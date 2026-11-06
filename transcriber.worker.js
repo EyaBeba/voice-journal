@@ -43,12 +43,16 @@ self.onmessage = async ({ data }) => {
   try {
     if (type === 'load') {
       await load(data.model, data.dtype);
-      self.postMessage({ type: 'done', reqId });
+      self.postMessage({ type: 'done', reqId, result: null });
     } else if (type === 'transcribe') {
       const p = await load(data.model, data.dtype);
-      const out = await p(data.audio, { chunk_length_s: 30, stride_length_s: 5 });
-      const text = (Array.isArray(out) ? out.map((o) => o.text).join(' ') : out.text || '').trim();
-      self.postMessage({ type: 'done', reqId, text });
+      const out = await p(data.audio, { chunk_length_s: 30, stride_length_s: 5, return_timestamps: true });
+      const first = Array.isArray(out) ? out[0] : out;
+      const text = (first?.text || '').trim();
+      const chunks = (first?.chunks || [])
+        .map((c) => ({ text: (c.text || '').trim(), s: c.timestamp?.[0] ?? null, e: c.timestamp?.[1] ?? null }))
+        .filter((c) => c.text && c.s !== null);
+      self.postMessage({ type: 'done', reqId, result: { text, chunks } });
     }
   } catch (err) {
     self.postMessage({ type: 'error', reqId, message: err?.message || String(err) });

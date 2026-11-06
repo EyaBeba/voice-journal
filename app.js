@@ -15,7 +15,7 @@ const MOODS = [
 ];
 const moodOf = (v) => MOODS.find((m) => m.v === v);
 const AUTO_LOCK_MS = 60_000;
-const APP_VERSION = 5;
+const APP_VERSION = 6;
 const PLAY_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/></svg>';
 const PAUSE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.5"/><rect x="14" y="5" width="4" height="14" rx="1.5"/></svg>';
 const EDIT_ICON = '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg>';
@@ -319,13 +319,23 @@ function drawLiveWave() {
 }
 
 /* ---------- playback ---------- */
-const player = { audio: new Audio(), id: null, url: null };
+const player = { audio: new Audio(), id: null, url: null, pendingSeek: null, fixingDuration: false };
 
 function stopPlayer() {
   player.audio.pause();
   if (player.url) URL.revokeObjectURL(player.url);
-  Object.assign(player, { id: null, url: null });
+  Object.assign(player, { id: null, url: null, pendingSeek: null, fixingDuration: false });
   syncPlayerUI();
+}
+
+function startPlayer(id) {
+  stopPlayer();
+  const entry = state.entries.find((e) => e.id === id);
+  if (!entry) return false;
+  player.url = URL.createObjectURL(blobOf(entry));
+  player.audio.src = player.url;
+  player.id = id;
+  return true;
 }
 
 function togglePlay(id) {
@@ -334,38 +344,140 @@ function togglePlay(id) {
     else player.audio.pause();
     return;
   }
-  stopPlayer();
-  const entry = state.entries.find((e) => e.id === id);
-  if (!entry) return;
-  player.url = URL.createObjectURL(blobOf(entry));
-  player.audio.src = player.url;
-  player.id = id;
+  if (startPlayer(id)) player.audio.play().catch(() => toast("Couldn't play this recording."));
+}
+
+/** Jump to a moment in a note (seconds) and play from there. */
+function seekTo(id, seconds) {
+  if (player.id !== id && !startPlayer(id)) return;
+  syncPlayerUI();
+  if (player.fixingDuration || !Number.isFinite(player.audio.duration)) {
+    player.pendingSeek = seconds; // applied once the browser knows the length
+  } else {
+    player.audio.currentTime = seconds;
+  }
   player.audio.play().catch(() => toast("Couldn't play this recording."));
 }
+
+// Recordings from MediaRecorder often have no length in their header, which breaks
+// seeking. Asking for a far-away time makes the browser work out the real length.
+player.audio.addEventListener('loadedmetadata', () => {
+  if (player.audio.duration === Infinity) {
+    player.fixingDuration = true;
+    player.audio.currentTime = 1e101;
+  }
+});
+player.audio.addEventListener('durationchange', () => {
+  if (player.fixingDuration && Number.isFinite(player.audio.duration)) {
+    player.fixingDuration = false;
+    player.audio.currentTime = player.pendingSeek ?? 0;
+    player.pendingSeek = null;
+  }
+});
+player.audio.addEventListener('seeked', () => {
+  if (!player.fixingDuration && player.pendingSeek !== null && Number.isFinite(player.audio.duration)) {
+    const t = player.pendingSeek;
+    player.pendingSeek = null;
+    player.audio.currentTime = t;
+  }
+});
 
 function syncPlayerUI() {
   $$('.entry').forEach((card) => {
     const active = card.dataset.id === player.id;
     const playing = active && !player.audio.paused;
     card.classList.toggle('playing', playing);
+    card.classList.toggle('open', active);
     const btn = $('.play', card);
     const icon = playing ? 'pause' : 'play';
     if (btn.dataset.icon !== icon) { btn.innerHTML = playing ? PAUSE_ICON : PLAY_ICON; btn.dataset.icon = icon; }
     btn.setAttribute('aria-label', playing ? 'Pause' : 'Play');
     if (!active) $('.progress i', card).style.width = '0';
+
+    const reader = $('.reader', card);
+    if (active && !reader) {
+      const entry = state.entries.find((e) => e.id === player.id);
+      const html = readerHtml(entry);
+      if (html) $('.entry-main .entry-meta', card).insertAdjacentHTML('afterend', html);
+    } else if (!active && reader) {
+      reader.remove();
+    }
   });
+  highlightNow();
+}
+
+/* ---------- follow-along transcript ---------- */
+/** Timed pieces of a transcript: exact from Whisper, or estimated from sentence length. */
+function segmentsFor(entry) {
+  if (!entry?.transcript?.trim()) return [];
+  const dur = (Number.isFinite(player.audio.duration) && player.id === entry.id ? player.audio.duration : entry.durationMs / 1000) || 0;
+  if (Array.isArray(entry.segments) && entry.segments.length) {
+    return entry.segments.map((seg, i, all) => ({
+      t: seg.t,
+      s: seg.s ?? 0,
+      e: seg.e ?? all[i + 1]?.s ?? dur,
+    }));
+  }
+  const parts = entry.transcript.trim().match(/[^.!?]+[.!?]*["”']?\s*/g)?.map((p) => p.trim()).filter(Boolean)
+    || [entry.transcript.trim()];
+  const total = parts.reduce((n, p) => n + p.length, 0);
+  let acc = 0;
+  return parts.map((p) => {
+    const seg = { t: p, s: (acc / total) * dur };
+    acc += p.length;
+    seg.e = (acc / total) * dur;
+    return seg;
+  });
+}
+
+function readerHtml(entry) {
+  const segs = segmentsFor(entry);
+  if (!segs.length) {
+    if (entry?.transcriptStatus === 'queued' || entry?.transcriptStatus === 'working') {
+      return '<div class="reader empty-reader">Transcribing… the text appears here when it’s ready.</div>';
+    }
+    return '';
+  }
+  return `<div class="reader" aria-label="Transcript">${segs.map((seg, i) =>
+    `<span class="seg" data-i="${i}" data-s="${seg.s.toFixed(2)}" role="button" tabindex="0">${esc(seg.t)}</span>`).join(' ')}</div>`;
+}
+
+function highlightNow() {
+  if (!player.id) return;
+  // The same note can appear on the Record and Journal screens; update every copy.
+  const readers = $$(`.entry[data-id="${CSS.escape(player.id)}"] .reader`);
+  if (!readers.length) return;
+  const entry = state.entries.find((e) => e.id === player.id);
+  const segs = segmentsFor(entry);
+  const t = player.fixingDuration ? 0 : player.audio.currentTime;
+  let now = -1;
+  segs.forEach((seg, i) => { if (t >= seg.s - 0.05) now = i; });
+  if (player.audio.ended) now = -1;
+  for (const reader of readers) {
+    $$('.seg', reader).forEach((el, i) => {
+      el.classList.toggle('now', i === now);
+      el.classList.toggle('past', i < now);
+    });
+    const active = $('.seg.now', reader);
+    if (active && !player.audio.paused && reader.offsetParent) {
+      const r = active.getBoundingClientRect();
+      if (r.bottom > window.innerHeight - 110 || r.top < 120) active.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+  }
 }
 
 player.audio.addEventListener('play', syncPlayerUI);
 player.audio.addEventListener('pause', syncPlayerUI);
-player.audio.addEventListener('ended', () => { player.audio.currentTime = 0; syncPlayerUI(); });
+player.audio.addEventListener('ended', () => { syncPlayerUI(); });
 player.audio.addEventListener('timeupdate', () => {
+  if (player.fixingDuration) return;
   const entry = state.entries.find((e) => e.id === player.id);
-  const bar = $(`.entry[data-id="${CSS.escape(player.id || '')}"] .progress i`);
-  if (!entry || !bar) return;
-  // Recorded webm often reports duration=Infinity, so use the duration we measured.
+  if (!entry) return;
+  // Recorded webm can report duration=Infinity, so fall back to the duration we measured.
   const total = Number.isFinite(player.audio.duration) ? player.audio.duration * 1000 : entry.durationMs;
-  bar.style.width = `${Math.min(100, (player.audio.currentTime * 1000 / total) * 100)}%`;
+  const width = `${Math.min(100, (player.audio.currentTime * 1000 / total) * 100)}%`;
+  $$(`.entry[data-id="${CSS.escape(player.id)}"] .progress i`).forEach((bar) => { bar.style.width = width; });
+  highlightNow();
 });
 
 /* ---------- entry list ---------- */
@@ -447,6 +559,11 @@ function renderJournal() {
 }
 
 function onListClick(ev) {
+  const seg = ev.target.closest('.seg');
+  if (seg) {
+    seekTo(seg.closest('.entry').dataset.id, Number(seg.dataset.s));
+    return;
+  }
   const btn = ev.target.closest('[data-action]');
   if (!btn) return;
   const id = btn.closest('.entry')?.dataset.id;
@@ -506,7 +623,9 @@ async function saveEditor(ev) {
     entry.tags = parseTags(f.elements.tags.value);
     entry.prompt = f.elements.usePrompt.checked ? state.editing.prompt : null;
     if (state.editing.transcriptDirty) {
-      entry.transcript = f.elements.transcript.value.trim();
+      const edited = f.elements.transcript.value.trim();
+      if (edited !== entry.transcript) entry.segments = null;
+      entry.transcript = edited;
       if (entry.transcript) entry.transcriptStatus = 'done';
     }
     try {
@@ -558,8 +677,11 @@ async function runQueue() {
         entry.transcriptStatus = 'working';
         onTranscriptChange(entry);
         try {
-          const text = await transcribe(state.tx.model, entry.audio);
+          const { text, chunks } = await transcribe(state.tx.model, entry.audio);
           entry.transcript = applyWordFixes(text);
+          entry.segments = chunks.length
+            ? chunks.map((c) => ({ t: applyWordFixes(c.text), s: c.s, e: c.e }))
+            : null;
           entry.transcriptStatus = 'done';
           delete entry.transcriptError;
         } catch (err) {
@@ -579,6 +701,7 @@ async function runQueue() {
 }
 
 function onTranscriptChange(entry, finished = false) {
+  if (player.id === entry.id) $(`.entry[data-id="${CSS.escape(entry.id)}"] .reader`)?.remove();
   if (state.editing?.id === entry.id && $('#editor').open) {
     if (finished && !state.editing.transcriptDirty) $('#entry-form').elements.transcript.value = entry.transcript || '';
     renderEditorTranscript(entry);
@@ -634,6 +757,7 @@ async function applyFixesToExisting() {
     const fixed = applyWordFixes(e.transcript);
     if (fixed !== e.transcript) {
       e.transcript = fixed;
+      if (Array.isArray(e.segments)) e.segments = e.segments.map((seg) => ({ ...seg, t: applyWordFixes(seg.t) }));
       await db.putEntry(e);
       changed++;
     }
@@ -905,6 +1029,10 @@ async function importZip(file) {
         tags: Array.isArray(m.tags) ? m.tags.filter((t) => typeof t === 'string') : [],
         prompt: typeof m.prompt === 'string' ? m.prompt : null,
         transcript: typeof m.transcript === 'string' ? m.transcript : '',
+        segments: Array.isArray(m.segments)
+          ? m.segments.filter((x) => x && typeof x.t === 'string' && typeof x.s === 'number')
+            .map((x) => ({ t: x.t, s: x.s, e: typeof x.e === 'number' ? x.e : null }))
+          : null,
         transcriptStatus: typeof m.transcript === 'string' && m.transcript ? 'done' : null,
         audio: audio.slice().buffer,
       });
@@ -1001,6 +1129,11 @@ function bindEvents() {
 
   $('#recent').addEventListener('click', onListClick);
   $('#entry-list').addEventListener('click', onListClick);
+  for (const list of [$('#recent'), $('#entry-list')]) {
+    list.addEventListener('keydown', (ev) => {
+      if ((ev.key === 'Enter' || ev.key === ' ') && ev.target.classList.contains('seg')) { ev.preventDefault(); onListClick(ev); }
+    });
+  }
   $('#search').addEventListener('input', renderJournal);
   $('#filter-mood').addEventListener('change', renderJournal);
   $('#filter-tag').addEventListener('change', renderJournal);

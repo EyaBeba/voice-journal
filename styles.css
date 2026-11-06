@@ -485,3 +485,18 @@ dialog audio { width: 100%; margin: 14px 0 4px; height: 40px; }
 .topbar h1 { white-space: nowrap; font-size: clamp(1.7rem, 7.6vw, 2.15rem); }
 .pill { white-space: nowrap; }
 .day-heading { font-family: var(--sans); }
+
+/* Follow-along transcript while a note plays */
+.entry.open .entry-transcript { display: none; }
+.reader {
+  margin-top: 14px; font-family: var(--serif); font-size: 1.28rem; line-height: 1.55;
+  color: var(--muted); animation: fade .35s ease;
+}
+.reader .seg {
+  cursor: pointer; border-radius: 4px; padding: 1px 2px; margin: 0 -2px;
+  transition: color .35s ease, background-color .35s ease;
+}
+.reader .seg.past { color: color-mix(in srgb, var(--text) 70%, var(--muted)); }
+.reader .seg.now { color: var(--accent-text); background: var(--accent-soft); }
+.reader .seg:focus-visible { outline: 1px solid var(--accent); }
+.empty-reader { font-style: italic; font-size: 1.05rem; }

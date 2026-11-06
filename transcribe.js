@@ -31,7 +31,7 @@ function getWorker() {
     const job = pending.get(data.reqId);
     if (!job) return;
     pending.delete(data.reqId);
-    if (data.type === 'done') job.resolve(data.text);
+    if (data.type === 'done') job.resolve(data.result);
     else job.reject(new Error(data.message));
   };
   worker.onerror = (ev) => {
@@ -81,4 +81,5 @@ async function decodeTo16kMono(arrayBuffer) {
 export async function transcribe(model, audioArrayBuffer) {
   const audio = await decodeTo16kMono(audioArrayBuffer);
   return call({ type: 'transcribe', model, dtype: MODELS[model].dtype, audio }, [audio.buffer]);
+  // resolves to { text, chunks: [{ text, s, e }] } (times in seconds)
 }
