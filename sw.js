@@ -1,5 +1,5 @@
 // Offline-first service worker: serve the app shell from cache, refresh it in the background.
-const CACHE = 'voice-journal-v3';
+const CACHE = 'voice-journal-v4';
 const ASSETS = [
   './',
   './index.html',

@@ -15,7 +15,10 @@ const MOODS = [
 ];
 const moodOf = (v) => MOODS.find((m) => m.v === v);
 const AUTO_LOCK_MS = 60_000;
-const APP_VERSION = 3;
+const APP_VERSION = 4;
+const PLAY_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/></svg>';
+const PAUSE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.5"/><rect x="14" y="5" width="4" height="14" rx="1.5"/></svg>';
+const EDIT_ICON = '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg>';
 
 const state = {
   entries: [],
@@ -345,7 +348,8 @@ function syncPlayerUI() {
     const playing = active && !player.audio.paused;
     card.classList.toggle('playing', playing);
     const btn = $('.play', card);
-    btn.textContent = playing ? '❚❚' : '▶';
+    const icon = playing ? 'pause' : 'play';
+    if (btn.dataset.icon !== icon) { btn.innerHTML = playing ? PAUSE_ICON : PLAY_ICON; btn.dataset.icon = icon; }
     btn.setAttribute('aria-label', playing ? 'Pause' : 'Play');
     if (!active) $('.progress i', card).style.width = '0';
   });
@@ -368,7 +372,7 @@ function entryCard(e) {
   const mood = moodOf(e.mood);
   return `
     <article class="entry" data-id="${esc(e.id)}">
-      <button class="play" type="button" data-action="play" aria-label="Play">▶</button>
+      <button class="play" type="button" data-action="play" aria-label="Play" data-icon="play">${PLAY_ICON}</button>
       <div class="entry-main">
         <div class="entry-title">${esc(e.title || 'Untitled entry')}</div>
         <div class="entry-meta">${fmtTime(e.createdAt)} · ${fmtDuration(e.durationMs)}</div>
@@ -379,7 +383,7 @@ function entryCard(e) {
       </div>
       <div class="entry-actions">
         <span class="entry-mood" title="${mood ? mood.l : 'No mood'}">${mood ? mood.e : ''}</span>
-        <button class="icon-btn" type="button" data-action="edit" aria-label="Edit entry">✎</button>
+        <button class="icon-btn" type="button" data-action="edit" aria-label="Edit entry">${EDIT_ICON}</button>
       </div>
     </article>`;
 }
@@ -903,7 +907,25 @@ async function renderSettings() {
 /* ---------- init ---------- */
 let installPrompt = null;
 
+/* ---------- theme ---------- */
+function readTheme() {
+  try { return localStorage.getItem('vj-theme') || 'dark'; } catch { return 'dark'; }
+}
+
+function applyTheme(choice) {
+  document.documentElement.dataset.theme = choice;
+  try { localStorage.setItem('vj-theme', choice); } catch { /* private mode: still applies for this visit */ }
+  $$('[data-theme-choice]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.themeChoice === choice)));
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.content = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
+  if (!rec.mr) drawIdleWave();
+}
+
 function bindEvents() {
+  $$('[data-theme-choice]').forEach((b) => b.addEventListener('click', () => applyTheme(b.dataset.themeChoice)));
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', () => {
+    if (readTheme() === 'system') applyTheme('system');
+  });
   $$('.tabs button').forEach((b) => b.addEventListener('click', () => showView(b.dataset.view)));
   $('#rec-btn').addEventListener('click', () => (rec.mr ? stopRecording() : startRecording()));
   $('#prompt-shuffle').addEventListener('click', () => { state.promptShift++; renderPrompt(); });
@@ -1018,6 +1040,8 @@ async function init() {
       })
       .catch((err) => console.warn('Service worker failed', err));
   }
+  applyTheme(readTheme());
+  $('#today-label').textContent = new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
   renderMoodPicker();
   bindEvents();
   renderPrompt();
