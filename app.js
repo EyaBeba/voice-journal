@@ -1,7 +1,7 @@
 import * as db from './db.js';
 import { createZip, readZip } from './zip.js';
 import { PROMPTS } from './prompts.js';
-import { MODELS, DEFAULT_MODEL, loadModel, transcribe } from './transcribe.js';
+import { MODELS, DEFAULT_MODEL, LEGACY_MODELS, loadModel, transcribe } from './transcribe.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -15,7 +15,7 @@ const MOODS = [
 ];
 const moodOf = (v) => MOODS.find((m) => m.v === v);
 const AUTO_LOCK_MS = 60_000;
-const APP_VERSION = 6;
+const APP_VERSION = 7;
 const PLAY_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/></svg>';
 const PAUSE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.5"/><rect x="14" y="5" width="4" height="14" rx="1.5"/></svg>';
 const EDIT_ICON = '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg>';
@@ -399,6 +399,7 @@ function syncPlayerUI() {
       const entry = state.entries.find((e) => e.id === player.id);
       const html = readerHtml(entry);
       if (html) $('.entry-main .entry-meta', card).insertAdjacentHTML('afterend', html);
+      follow.lastId = null; // transcript may have changed
     } else if (!active && reader) {
       reader.remove();
     }
@@ -430,30 +431,60 @@ function segmentsFor(entry) {
   });
 }
 
+/** Timed words: exact from Whisper, or spread across each sentence by length. */
+function wordsFor(entry) {
+  if (!entry?.transcript?.trim()) return [];
+  if (Array.isArray(entry.words) && entry.words.length) {
+    return entry.words.map((x, i, all) => ({ w: x.w.trim(), s: x.s, e: x.e ?? all[i + 1]?.s ?? x.s + 0.3 }));
+  }
+  const out = [];
+  for (const seg of segmentsFor(entry)) {
+    const ws = seg.t.split(/\s+/).filter(Boolean);
+    const total = ws.reduce((n, w) => n + w.length + 1, 0);
+    let acc = 0;
+    for (const w of ws) {
+      const s = seg.s + (acc / total) * (seg.e - seg.s);
+      acc += w.length + 1;
+      out.push({ w, s, e: seg.s + (acc / total) * (seg.e - seg.s) });
+    }
+  }
+  return out;
+}
+
 function readerHtml(entry) {
-  const segs = segmentsFor(entry);
-  if (!segs.length) {
+  const words = wordsFor(entry);
+  if (!words.length) {
     if (entry?.transcriptStatus === 'queued' || entry?.transcriptStatus === 'working') {
       return '<div class="reader empty-reader">Transcribing… the text appears here when it’s ready.</div>';
     }
     return '';
   }
-  return `<div class="reader" aria-label="Transcript">${segs.map((seg, i) =>
-    `<span class="seg" data-i="${i}" data-s="${seg.s.toFixed(2)}" role="button" tabindex="0">${esc(seg.t)}</span>`).join(' ')}</div>`;
+  return `<div class="reader" aria-label="Transcript">${words.map((x, i) =>
+    `<span class="seg" data-i="${i}" data-s="${x.s.toFixed(2)}" role="button" tabindex="0">${esc(x.w)}</span>`).join(' ')}</div>`;
 }
+
+const follow = { raf: 0, lastId: null, lastIndex: -2, words: [] };
 
 function highlightNow() {
   if (!player.id) return;
   // The same note can appear on the Record and Journal screens; update every copy.
   const readers = $$(`.entry[data-id="${CSS.escape(player.id)}"] .reader`);
   if (!readers.length) return;
-  const entry = state.entries.find((e) => e.id === player.id);
-  const segs = segmentsFor(entry);
+  if (follow.lastId !== player.id) {
+    follow.words = wordsFor(state.entries.find((e) => e.id === player.id));
+    follow.lastId = player.id;
+    follow.lastIndex = -2;
+  }
   const t = player.fixingDuration ? 0 : player.audio.currentTime;
   let now = -1;
-  segs.forEach((seg, i) => { if (t >= seg.s - 0.05) now = i; });
+  // The word being spoken is the last one whose start time has passed.
+  for (let i = 0; i < follow.words.length && follow.words[i].s <= t + 0.02; i++) now = i;
   if (player.audio.ended) now = -1;
+  const fresh = readers.some((r) => !r.dataset.painted);
+  if (now === follow.lastIndex && !fresh) return;
+  follow.lastIndex = now;
   for (const reader of readers) {
+    reader.dataset.painted = '1';
     $$('.seg', reader).forEach((el, i) => {
       el.classList.toggle('now', i === now);
       el.classList.toggle('past', i < now);
@@ -465,6 +496,19 @@ function highlightNow() {
     }
   }
 }
+
+// Smooth word-by-word tracking: check every frame while audio plays.
+function followLoop() {
+  cancelAnimationFrame(follow.raf);
+  const tick = () => {
+    highlightNow();
+    if (!player.audio.paused && !player.audio.ended) follow.raf = requestAnimationFrame(tick);
+  };
+  tick();
+}
+player.audio.addEventListener('playing', followLoop);
+player.audio.addEventListener('seeked', () => { follow.lastIndex = -2; highlightNow(); });
+player.audio.addEventListener('emptied', () => { follow.lastId = null; });
 
 player.audio.addEventListener('play', syncPlayerUI);
 player.audio.addEventListener('pause', syncPlayerUI);
@@ -624,7 +668,7 @@ async function saveEditor(ev) {
     entry.prompt = f.elements.usePrompt.checked ? state.editing.prompt : null;
     if (state.editing.transcriptDirty) {
       const edited = f.elements.transcript.value.trim();
-      if (edited !== entry.transcript) entry.segments = null;
+      if (edited !== entry.transcript) { entry.segments = null; entry.words = null; }
       entry.transcript = edited;
       if (entry.transcript) entry.transcriptStatus = 'done';
     }
@@ -677,11 +721,10 @@ async function runQueue() {
         entry.transcriptStatus = 'working';
         onTranscriptChange(entry);
         try {
-          const { text, chunks } = await transcribe(state.tx.model, entry.audio);
+          const { text, words } = await transcribe(state.tx.model, entry.audio);
           entry.transcript = applyWordFixes(text);
-          entry.segments = chunks.length
-            ? chunks.map((c) => ({ t: applyWordFixes(c.text), s: c.s, e: c.e }))
-            : null;
+          entry.words = words.length ? fixWords(words) : null;
+          entry.segments = null;
           entry.transcriptStatus = 'done';
           delete entry.transcriptError;
         } catch (err) {
@@ -726,6 +769,19 @@ function applyWordFixes(text) {
   return out;
 }
 
+function fixWords(words) {
+  return words.map((x, i) => {
+    const fixed = applyWordFixes(x.w.trim());
+    if (fixed === x.w.trim()) return { ...x };
+    const prev = i ? words[i - 1].w.trim() : '';
+    const sentenceStart = !prev || /[.!?]$/.test(prev);
+    const word = sentenceStart ? fixed[0].toUpperCase() + fixed.slice(1) : fixed[0].toLowerCase() + fixed.slice(1);
+    // keep the user's spelling when it isn't a plain lowercase word (e.g. names)
+    const fix = state.wordFixes.find((f) => f.to.toLowerCase() === fixed.toLowerCase());
+    return { ...x, w: sentenceStart || !fix ? word : fix.to };
+  });
+}
+
 function renderWordFixes() {
   $('#fix-list').innerHTML = state.wordFixes.map((f, i) => `
     <li><span><span class="from">${esc(f.from)}</span><span class="sep">&rarr;</span><span class="to">${esc(f.to)}</span></span>
@@ -758,6 +814,7 @@ async function applyFixesToExisting() {
     if (fixed !== e.transcript) {
       e.transcript = fixed;
       if (Array.isArray(e.segments)) e.segments = e.segments.map((seg) => ({ ...seg, t: applyWordFixes(seg.t) }));
+      if (Array.isArray(e.words)) e.words = fixWords(e.words);
       await db.putEntry(e);
       changed++;
     }
@@ -791,6 +848,36 @@ async function enableTranscription() {
     state.txDownload = null;
     renderSettings();
     rerenderActive();
+  }
+}
+
+/** After an app update that changes the model, fetch the new one quietly (needs internet once). */
+async function updateModelInBackground() {
+  if (!navigator.onLine) {
+    window.addEventListener('online', updateModelInBackground, { once: true });
+    return;
+  }
+  const model = state.tx.model;
+  state.txDownload = 0;
+  state.txUpdating = true;
+  renderTxSettings();
+  try {
+    await loadModel(model, (fraction) => {
+      state.txDownload = fraction;
+      const bar = $('#tx-progress i');
+      if (bar) bar.style.width = `${Math.round(fraction * 100)}%`;
+      if ($('#view-settings').classList.contains('active')) {
+        $('#tx-status').textContent = `Updating to word-by-word timing… ${Math.round(fraction * 100)}%`;
+      }
+    });
+    state.txNeedsUpdate = false;
+    toast('Transcription updated: new notes now highlight word by word.');
+  } catch (err) {
+    console.warn('Model update failed', err);
+  } finally {
+    state.txDownload = null;
+    state.txUpdating = false;
+    if ($('#view-settings').classList.contains('active')) renderSettings();
   }
 }
 
@@ -835,7 +922,9 @@ function renderTxSettings() {
   sel.disabled = downloading;
 
   if (downloading) {
-    $('#tx-status').textContent = `Downloading ${MODELS[chosen].label} model… ${Math.round(state.txDownload * 100)}%`;
+    $('#tx-status').textContent = state.txUpdating
+      ? `Updating to word-by-word timing… ${Math.round(state.txDownload * 100)}%`
+      : `Downloading ${MODELS[chosen].label} model… ${Math.round(state.txDownload * 100)}%`;
   } else if (state.tx.enabled) {
     $('#tx-status').textContent = `On, using the ${MODELS[state.tx.model].label} model. Works offline.${queued ? ` Transcribing ${queued} note${queued === 1 ? '' : 's'}…` : ''}`;
   } else {
@@ -1029,6 +1118,10 @@ async function importZip(file) {
         tags: Array.isArray(m.tags) ? m.tags.filter((t) => typeof t === 'string') : [],
         prompt: typeof m.prompt === 'string' ? m.prompt : null,
         transcript: typeof m.transcript === 'string' ? m.transcript : '',
+        words: Array.isArray(m.words)
+          ? m.words.filter((x) => x && typeof x.w === 'string' && typeof x.s === 'number')
+            .map((x) => ({ w: x.w, s: x.s, e: typeof x.e === 'number' ? x.e : null }))
+          : null,
         segments: Array.isArray(m.segments)
           ? m.segments.filter((x) => x && typeof x.t === 'string' && typeof x.s === 'number')
             .map((x) => ({ t: x.t, s: x.s, e: typeof x.e === 'number' ? x.e : null }))
@@ -1262,6 +1355,11 @@ async function init() {
     if (state.hasPin) lock();
     state.entries = await db.allEntries();
     state.tx = { ...state.tx, ...(await db.getMeta('transcription')) };
+    if (LEGACY_MODELS[state.tx.model] || !MODELS[state.tx.model]) {
+      state.tx.model = LEGACY_MODELS[state.tx.model] || DEFAULT_MODEL;
+      await db.setMeta('transcription', state.tx);
+      state.txNeedsUpdate = state.tx.enabled;
+    }
     state.micId = (await db.getMeta('micId')) || '';
     state.wordFixes = (await db.getMeta('wordFixes')) || [];
   } catch (err) {
@@ -1269,6 +1367,7 @@ async function init() {
   }
   renderStreakBadge();
   renderRecent();
+  if (state.txNeedsUpdate) updateModelInBackground();
   if (state.tx.enabled) {
     state.entries
       .filter((e) => e.transcriptStatus === 'queued' || e.transcriptStatus === 'working')

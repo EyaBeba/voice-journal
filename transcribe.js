@@ -1,20 +1,28 @@
 // Main-thread side of offline transcription: model choice, audio decoding and a
 // one-at-a-time job queue that talks to transcriber.worker.js.
+// "_timestamped" exports include the attention outputs Whisper needs to time every word.
 export const MODELS = {
-  'Xenova/whisper-tiny.en': {
+  'onnx-community/whisper-tiny.en_timestamped': {
     label: 'Tiny', size: '~65 MB', note: 'Fastest, least accurate',
     dtype: { encoder_model: 'fp32', decoder_model_merged: 'q8' },
   },
-  'Xenova/whisper-base.en': {
+  'onnx-community/whisper-base.en_timestamped': {
     label: 'Base', size: '~80 MB', note: 'Good balance',
     dtype: { encoder_model: 'q8', decoder_model_merged: 'q8' },
   },
-  'Xenova/whisper-small.en': {
+  'onnx-community/whisper-small.en_timestamped': {
     label: 'Small', size: '~250 MB', note: 'Most accurate, slow, needs a recent phone',
     dtype: { encoder_model: 'q8', decoder_model_merged: 'q8' },
   },
 };
-export const DEFAULT_MODEL = 'Xenova/whisper-base.en';
+export const DEFAULT_MODEL = 'onnx-community/whisper-base.en_timestamped';
+
+// Models used by earlier versions of the app, mapped to their word-timing equivalents.
+export const LEGACY_MODELS = {
+  'Xenova/whisper-tiny.en': 'onnx-community/whisper-tiny.en_timestamped',
+  'Xenova/whisper-base.en': 'onnx-community/whisper-base.en_timestamped',
+  'Xenova/whisper-small.en': 'onnx-community/whisper-small.en_timestamped',
+};
 
 let worker = null;
 let nextReq = 1;
@@ -81,5 +89,5 @@ async function decodeTo16kMono(arrayBuffer) {
 export async function transcribe(model, audioArrayBuffer) {
   const audio = await decodeTo16kMono(audioArrayBuffer);
   return call({ type: 'transcribe', model, dtype: MODELS[model].dtype, audio }, [audio.buffer]);
-  // resolves to { text, chunks: [{ text, s, e }] } (times in seconds)
+  // resolves to { text, words: [{ w, s, e }] } (times in seconds)
 }

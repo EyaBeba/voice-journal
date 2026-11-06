@@ -46,13 +46,13 @@ self.onmessage = async ({ data }) => {
       self.postMessage({ type: 'done', reqId, result: null });
     } else if (type === 'transcribe') {
       const p = await load(data.model, data.dtype);
-      const out = await p(data.audio, { chunk_length_s: 30, stride_length_s: 5, return_timestamps: true });
+      const out = await p(data.audio, { chunk_length_s: 30, stride_length_s: 5, return_timestamps: 'word' });
       const first = Array.isArray(out) ? out[0] : out;
       const text = (first?.text || '').trim();
-      const chunks = (first?.chunks || [])
-        .map((c) => ({ text: (c.text || '').trim(), s: c.timestamp?.[0] ?? null, e: c.timestamp?.[1] ?? null }))
-        .filter((c) => c.text && c.s !== null);
-      self.postMessage({ type: 'done', reqId, result: { text, chunks } });
+      const words = (first?.chunks || [])
+        .map((c) => ({ w: c.text || '', s: c.timestamp?.[0] ?? null, e: c.timestamp?.[1] ?? null }))
+        .filter((c) => c.w.trim() && c.s !== null);
+      self.postMessage({ type: 'done', reqId, result: { text, words } });
     }
   } catch (err) {
     self.postMessage({ type: 'error', reqId, message: err?.message || String(err) });

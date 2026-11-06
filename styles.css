@@ -500,3 +500,16 @@ dialog audio { width: 100%; margin: 14px 0 4px; height: 40px; }
 .reader .seg.now { color: var(--accent-text); background: var(--accent-soft); }
 .reader .seg:focus-visible { outline: 1px solid var(--accent); }
 .empty-reader { font-style: italic; font-size: 1.05rem; }
+
+/* Lock screen: centered, never wider than the screen */
+.lock-card { width: min(320px, 100%); justify-items: center; }
+.lock-card > * { min-width: 0; width: 100%; }
+.lock-card .lock-icon { width: 34px; height: 34px; color: var(--accent-text); stroke-width: 1.2; margin-bottom: 4px; }
+.lock-card input { width: 100%; letter-spacing: .5em; text-indent: .5em; }
+.lock-card input::placeholder { letter-spacing: .2em; text-indent: 0; font-size: .8rem; text-transform: uppercase; color: var(--muted); }
+.lock-card .btn { width: 100%; }
+
+/* Word-by-word follow-along */
+.reader .seg { margin: 0; padding: 1px 0; border-radius: 3px; transition: color .15s ease, background-color .15s ease, box-shadow .15s ease; }
+.reader .seg.past { color: var(--text); }
+.reader .seg.now { color: var(--accent-text); background: var(--accent-soft); box-shadow: 0 0 0 3px var(--accent-soft); }
