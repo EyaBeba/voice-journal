@@ -58,7 +58,7 @@
     <!-- Journal -->
     <section id="view-journal" class="view" aria-label="Journal">
       <div class="filters">
-        <input id="search" type="search" placeholder="Search titles, tags, prompts">
+        <input id="search" type="search" placeholder="Search what you said, titles, tags">
         <div class="filter-row">
           <select id="filter-mood" aria-label="Filter by mood"></select>
           <select id="filter-tag" aria-label="Filter by tag"></select>
@@ -88,6 +88,26 @@
 
     <!-- Settings -->
     <section id="view-settings" class="view" aria-label="Settings">
+      <div class="card">
+        <h3>Transcription</h3>
+        <p id="tx-status" class="muted"></p>
+        <label class="field">
+          <span>Model</span>
+          <select id="tx-model"></select>
+        </label>
+        <div id="tx-progress" class="progress big" hidden><i></i></div>
+        <div class="row" style="margin-top:12px">
+          <button class="btn primary" type="button" id="tx-enable">Download and turn on</button>
+          <button class="btn" type="button" id="tx-backlog" hidden>Transcribe older notes</button>
+          <button class="btn" type="button" id="tx-disable" hidden>Turn off</button>
+        </div>
+        <label id="tx-auto-row" class="check" hidden>
+          <input id="tx-auto" type="checkbox">
+          <span>Transcribe automatically after each recording</span>
+        </label>
+        <p class="muted small">Speech-to-text runs on this phone with Whisper (English). The model downloads once, which needs internet; after that it works offline and your audio never leaves the device. <button class="link-btn" type="button" id="tx-delete">Delete downloaded models</button></p>
+      </div>
+
       <div class="card">
         <h3>PIN lock</h3>
         <p id="pin-status" class="muted"></p>
@@ -146,6 +166,15 @@
         <span>Title</span>
         <input name="entryTitle" type="text" maxlength="120" placeholder="Give it a name (optional)">
       </label>
+
+      <label class="field">
+        <span>Transcript</span>
+        <textarea name="transcript" rows="4" placeholder="The text of your note appears here"></textarea>
+      </label>
+      <div class="transcript-row">
+        <p id="editor-transcript-status" class="muted small" aria-live="polite"></p>
+        <button id="editor-transcribe" class="btn small-btn" type="button" hidden>Transcribe</button>
+      </div>
 
       <fieldset class="field">
         <legend>Mood</legend>

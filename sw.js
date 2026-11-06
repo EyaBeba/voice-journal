@@ -1,5 +1,5 @@
 // Offline-first service worker: serve the app shell from cache, refresh it in the background.
-const CACHE = 'voice-journal-v1';
+const CACHE = 'voice-journal-v2';
 const ASSETS = [
   './',
   './index.html',
@@ -8,6 +8,8 @@ const ASSETS = [
   './db.js',
   './zip.js',
   './prompts.js',
+  './transcribe.js',
+  './transcriber.worker.js',
   './manifest.webmanifest',
   './icons/icon.svg',
   './icons/icon-192.png',
@@ -29,6 +31,20 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const { request } = event;
   if (request.method !== 'GET' || new URL(request.url).origin !== self.location.origin) return;
+
+  // Bundled speech-to-text engine: large and never changes, so cache it on first use
+  // and don't re-download it in the background.
+  if (new URL(request.url).pathname.includes('/vendor/')) {
+    event.respondWith((async () => {
+      const cache = await caches.open(CACHE);
+      const hit = await cache.match(request, { ignoreSearch: true });
+      if (hit) return hit;
+      const res = await fetch(request);
+      if (res.ok) await cache.put(request, res.clone());
+      return res;
+    })());
+    return;
+  }
 
   event.respondWith((async () => {
     const cache = await caches.open(CACHE);

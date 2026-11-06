@@ -1,6 +1,7 @@
 import * as db from './db.js';
 import { createZip, readZip } from './zip.js';
 import { PROMPTS } from './prompts.js';
+import { MODELS, DEFAULT_MODEL, loadModel, transcribe } from './transcribe.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -24,6 +25,10 @@ const state = {
   editorUrl: null,
   hasPin: false,
   hiddenAt: 0,
+  tx: { enabled: false, auto: true, model: DEFAULT_MODEL }, // saved transcription settings
+  txQueue: [], // entry ids waiting to be transcribed
+  txBusy: false,
+  txDownload: null, // 0..1 while a model is downloading
 };
 
 /* ---------- helpers ---------- */
@@ -136,6 +141,7 @@ function rerenderActive() {
   if (active === 'record') renderRecent();
   if (active === 'journal') renderJournal();
   if (active === 'calendar') renderCalendar();
+  if (active === 'settings') renderSettings();
 }
 
 /* ---------- prompts ---------- */
@@ -219,6 +225,7 @@ async function onRecordingStop() {
   const entry = {
     id: uid(), createdAt: start, durationMs, mime: type,
     title: '', mood: null, tags: [], prompt: todaysPrompt(),
+    transcript: '', transcriptStatus: state.tx.enabled && state.tx.auto ? 'queued' : null,
     audio: await blob.arrayBuffer(),
   };
   try {
@@ -231,6 +238,7 @@ async function onRecordingStop() {
   requestPersistence();
   rerenderActive();
   openEditor(entry, true);
+  if (entry.transcriptStatus === 'queued') queueTranscription(entry);
 }
 
 /* ---------- waveform ---------- */
@@ -338,6 +346,7 @@ function entryCard(e) {
       <div class="entry-main">
         <div class="entry-title">${esc(e.title || 'Untitled entry')}</div>
         <div class="entry-meta">${fmtTime(e.createdAt)} · ${fmtDuration(e.durationMs)}</div>
+        ${transcriptLine(e)}
         ${e.prompt ? `<div class="entry-prompt">“${esc(e.prompt)}”</div>` : ''}
         ${e.tags.length ? `<div class="entry-tags">${e.tags.map((t) => `<span class="tag">#${esc(t)}</span>`).join('')}</div>` : ''}
         <div class="progress"><i></i></div>
@@ -347,6 +356,14 @@ function entryCard(e) {
         <button class="icon-btn" type="button" data-action="edit" aria-label="Edit entry">✎</button>
       </div>
     </article>`;
+}
+
+function transcriptLine(e) {
+  if (e.transcript) return `<div class="entry-transcript">${esc(e.transcript)}</div>`;
+  if (e.transcriptStatus === 'working') return '<div class="entry-status">✍️ Transcribing…</div>';
+  if (e.transcriptStatus === 'queued') return '<div class="entry-status">✍️ Waiting to transcribe…</div>';
+  if (e.transcriptStatus === 'error') return '<div class="entry-status error">Transcription failed. Open the entry to retry.</div>';
+  return '';
 }
 
 function renderList(container, entries, emptyHtml) {
@@ -386,7 +403,7 @@ function renderJournal() {
     (!state.filterDay || dayKey(e.createdAt) === state.filterDay)
     && (!mood || e.mood === mood)
     && (!tag || e.tags.includes(tag))
-    && (!q || [e.title, e.prompt, ...e.tags].join(' ').toLowerCase().includes(q)));
+    && (!q || [e.title, e.prompt, e.transcript, ...e.tags].join(' ').toLowerCase().includes(q)));
 
   const chip = $('#day-chip');
   chip.hidden = !state.filterDay;
@@ -431,6 +448,9 @@ function openEditor(entry, isNew) {
   $('#editor-prompt').hidden = !entry.prompt;
   $('#editor-prompt-text').textContent = entry.prompt || '';
   f.elements.usePrompt.checked = !!entry.prompt;
+  f.elements.transcript.value = entry.transcript || '';
+  state.editing.transcriptDirty = false;
+  renderEditorTranscript(entry);
 
   if (state.editorUrl) URL.revokeObjectURL(state.editorUrl);
   state.editorUrl = URL.createObjectURL(blobOf(entry));
@@ -453,6 +473,10 @@ async function saveEditor(ev) {
     entry.mood = mood ? Number(mood.value) : null;
     entry.tags = parseTags(f.elements.tags.value);
     entry.prompt = f.elements.usePrompt.checked ? state.editing.prompt : null;
+    if (state.editing.transcriptDirty) {
+      entry.transcript = f.elements.transcript.value.trim();
+      if (entry.transcript) entry.transcriptStatus = 'done';
+    }
     try {
       await db.putEntry(entry);
       toast('Entry saved');
@@ -462,6 +486,163 @@ async function saveEditor(ev) {
   }
   $('#editor').close();
   rerenderActive();
+}
+
+function renderEditorTranscript(entry) {
+  const status = $('#editor-transcript-status');
+  const btn = $('#editor-transcribe');
+  const busy = entry.transcriptStatus === 'queued' || entry.transcriptStatus === 'working';
+  if (!state.tx.enabled) {
+    status.textContent = entry.transcript ? '' : 'Turn on transcription in Settings to get this as text, or type it yourself.';
+    btn.hidden = true;
+    return;
+  }
+  status.textContent = busy
+    ? (entry.transcriptStatus === 'working' ? 'Transcribing… you can save and close, it keeps going.' : 'Waiting to transcribe…')
+    : entry.transcriptStatus === 'error' ? `Transcription failed: ${entry.transcriptError || 'unknown error'}` : '';
+  btn.hidden = busy;
+  btn.textContent = entry.transcript ? 'Transcribe again' : 'Transcribe';
+}
+
+/* ---------- transcription ---------- */
+async function queueTranscription(entry) {
+  if (!state.tx.enabled) return;
+  if (!state.txQueue.includes(entry.id)) state.txQueue.push(entry.id);
+  if (entry.transcriptStatus !== 'queued') {
+    entry.transcriptStatus = 'queued';
+    await db.putEntry(entry);
+  }
+  onTranscriptChange(entry);
+  runQueue();
+}
+
+async function runQueue() {
+  if (state.txBusy) return;
+  state.txBusy = true;
+  try {
+    while (state.txQueue.length && state.tx.enabled) {
+      const entry = state.entries.find((e) => e.id === state.txQueue[0]);
+      if (entry) {
+        entry.transcriptStatus = 'working';
+        onTranscriptChange(entry);
+        try {
+          const text = await transcribe(state.tx.model, entry.audio);
+          entry.transcript = text;
+          entry.transcriptStatus = 'done';
+          delete entry.transcriptError;
+        } catch (err) {
+          console.warn('Transcription failed', err);
+          entry.transcriptStatus = 'error';
+          entry.transcriptError = navigator.onLine ? (err.message || String(err)) : 'offline and the model is not downloaded yet';
+        }
+        if (state.entries.includes(entry)) await db.putEntry(entry);
+        onTranscriptChange(entry, true);
+      }
+      state.txQueue.shift();
+    }
+  } finally {
+    state.txBusy = false;
+    if ($('#view-settings').classList.contains('active')) renderSettings();
+  }
+}
+
+function onTranscriptChange(entry, finished = false) {
+  if (state.editing?.id === entry.id && $('#editor').open) {
+    if (finished && !state.editing.transcriptDirty) $('#entry-form').elements.transcript.value = entry.transcript || '';
+    renderEditorTranscript(entry);
+  }
+  rerenderActive();
+}
+
+async function saveTxSettings() {
+  await db.setMeta('transcription', state.tx);
+}
+
+async function enableTranscription() {
+  const model = $('#tx-model').value;
+  state.txDownload = 0;
+  renderSettings();
+  try {
+    await loadModel(model, (fraction) => {
+      state.txDownload = fraction;
+      const bar = $('#tx-progress i');
+      if (bar) bar.style.width = `${Math.round(fraction * 100)}%`;
+      $('#tx-status').textContent = `Downloading ${MODELS[model].label} model… ${Math.round(fraction * 100)}%`;
+    });
+    state.tx = { ...state.tx, enabled: true, model };
+    await saveTxSettings();
+    requestPersistence();
+    toast('Transcription is on and works offline.');
+  } catch (err) {
+    toast(navigator.onLine ? `Download failed: ${err.message || err}` : 'You are offline. Connect to the internet to download the model.');
+  } finally {
+    state.txDownload = null;
+    renderSettings();
+    rerenderActive();
+  }
+}
+
+async function disableTranscription() {
+  state.tx = { ...state.tx, enabled: false };
+  state.txQueue = [];
+  for (const e of state.entries) {
+    if (e.transcriptStatus === 'queued' || e.transcriptStatus === 'working') {
+      e.transcriptStatus = null;
+      await db.putEntry(e);
+    }
+  }
+  await saveTxSettings();
+  toast('Transcription turned off. Existing transcripts are kept.');
+  renderSettings();
+  rerenderActive();
+}
+
+async function deleteModels() {
+  if (!confirm('Delete downloaded transcription models to free up space? You can download them again later.')) return;
+  if (state.tx.enabled) await disableTranscription();
+  await caches.delete('transformers-cache');
+  toast('Downloaded models deleted.');
+  renderSettings();
+}
+
+function untranscribed() {
+  return state.entries.filter((e) => !e.transcript && e.transcriptStatus !== 'queued' && e.transcriptStatus !== 'working');
+}
+
+function renderTxSettings() {
+  const sel = $('#tx-model');
+  if (!sel.options.length) {
+    sel.innerHTML = Object.entries(MODELS)
+      .map(([id, m]) => `<option value="${id}">${m.label} (${m.size}): ${m.note}</option>`).join('');
+    sel.value = state.tx.model;
+  }
+  const downloading = state.txDownload !== null;
+  const chosen = sel.value;
+  const queued = state.txQueue.length;
+  $('#tx-progress').hidden = !downloading;
+  sel.disabled = downloading;
+
+  if (downloading) {
+    $('#tx-status').textContent = `Downloading ${MODELS[chosen].label} model… ${Math.round(state.txDownload * 100)}%`;
+  } else if (state.tx.enabled) {
+    $('#tx-status').textContent = `On, using the ${MODELS[state.tx.model].label} model. Works offline.${queued ? ` Transcribing ${queued} note${queued === 1 ? '' : 's'}…` : ''}`;
+  } else {
+    $('#tx-status').textContent = 'Off. Turn it on to get a text version of each voice note.';
+  }
+
+  const needsDownload = !state.tx.enabled || chosen !== state.tx.model;
+  const enableBtn = $('#tx-enable');
+  enableBtn.hidden = !needsDownload;
+  enableBtn.disabled = downloading;
+  enableBtn.textContent = state.tx.enabled ? `Switch to ${MODELS[chosen].label} (${MODELS[chosen].size})` : `Download and turn on (${MODELS[chosen].size})`;
+  $('#tx-disable').hidden = !state.tx.enabled || downloading;
+  $('#tx-auto-row').hidden = !state.tx.enabled;
+  $('#tx-auto').checked = state.tx.auto;
+
+  const backlog = state.tx.enabled ? untranscribed().length : 0;
+  const backlogBtn = $('#tx-backlog');
+  backlogBtn.hidden = !backlog || downloading;
+  backlogBtn.textContent = `Transcribe ${backlog} older note${backlog === 1 ? '' : 's'}`;
 }
 
 async function discardEditor() {
@@ -605,7 +786,7 @@ async function exportZip() {
   for (const e of state.entries) {
     const name = `audio/${dayKey(e.createdAt)}_${e.id}.${extFor(e.mime)}`;
     files.push({ name, data: new Uint8Array(e.audio) });
-    const { audio, ...rest } = e;
+    const { audio, transcriptStatus, transcriptError, ...rest } = e;
     meta.push({ ...rest, audioFile: name });
   }
   const manifest = { app: 'voice-journal', version: 1, exportedAt: new Date().toISOString(), entries: meta };
@@ -635,6 +816,8 @@ async function importZip(file) {
         mood: MOODS.some((x) => x.v === m.mood) ? m.mood : null,
         tags: Array.isArray(m.tags) ? m.tags.filter((t) => typeof t === 'string') : [],
         prompt: typeof m.prompt === 'string' ? m.prompt : null,
+        transcript: typeof m.transcript === 'string' ? m.transcript : '',
+        transcriptStatus: typeof m.transcript === 'string' && m.transcript ? 'done' : null,
         audio: audio.slice().buffer,
       });
       added++;
@@ -650,6 +833,7 @@ async function importZip(file) {
 
 /* ---------- settings ---------- */
 async function renderSettings() {
+  renderTxSettings();
   $('#pin-status').textContent = state.hasPin ? 'A PIN is set. The app locks on open and after 1 minute in the background.' : 'No PIN set.';
   $('#pin-current').hidden = !state.hasPin;
   $('#pin-remove').hidden = !state.hasPin;
@@ -705,6 +889,18 @@ function bindEvents() {
     renderTagSuggestions();
   });
   $('#discard-btn').addEventListener('click', discardEditor);
+  $('#entry-form').elements.transcript.addEventListener('input', () => { if (state.editing) state.editing.transcriptDirty = true; });
+  $('#editor-transcribe').addEventListener('click', () => {
+    const entry = state.entries.find((e) => e.id === state.editing?.id);
+    if (entry) queueTranscription(entry);
+  });
+
+  $('#tx-model').addEventListener('change', renderTxSettings);
+  $('#tx-enable').addEventListener('click', enableTranscription);
+  $('#tx-disable').addEventListener('click', disableTranscription);
+  $('#tx-delete').addEventListener('click', deleteModels);
+  $('#tx-auto').addEventListener('change', async (ev) => { state.tx.auto = ev.target.checked; await saveTxSettings(); });
+  $('#tx-backlog').addEventListener('click', () => { untranscribed().forEach((e) => queueTranscription(e)); });
   $('#editor').addEventListener('close', () => {
     $('#editor-audio').pause();
     if (state.editorUrl) URL.revokeObjectURL(state.editorUrl);
@@ -766,11 +962,18 @@ async function init() {
     state.hasPin = !!(await db.getMeta('pin'));
     if (state.hasPin) lock();
     state.entries = await db.allEntries();
+    state.tx = { ...state.tx, ...(await db.getMeta('transcription')) };
   } catch (err) {
     toast(`Storage is unavailable: ${err.message || err}`);
   }
   renderStreakBadge();
   renderRecent();
+  if (state.tx.enabled) {
+    state.entries
+      .filter((e) => e.transcriptStatus === 'queued' || e.transcriptStatus === 'working')
+      .reverse()
+      .forEach((e) => queueTranscription(e));
+  }
 }
 
 init();
