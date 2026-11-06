@@ -1,5 +1,5 @@
 // Offline-first service worker: serve the app shell from cache, refresh it in the background.
-const CACHE = 'voice-journal-v2';
+const CACHE = 'voice-journal-v3';
 const ASSETS = [
   './',
   './index.html',
@@ -17,7 +17,7 @@ const ASSETS = [
 ];
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  event.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS.map((url) => new Request(url, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (event) => {
@@ -50,7 +50,8 @@ self.addEventListener('fetch', (event) => {
     const cache = await caches.open(CACHE);
     const key = request.mode === 'navigate' ? './index.html' : request;
     const cached = await cache.match(key, { ignoreSearch: true });
-    const network = fetch(request)
+    // Always check GitHub for a newer file (skipping the browser's HTTP cache).
+    const network = fetch(request.url, { cache: 'no-cache', credentials: 'same-origin' })
       .then((res) => {
         if (res.ok) cache.put(key, res.clone());
         return res;

@@ -15,6 +15,7 @@ const MOODS = [
 ];
 const moodOf = (v) => MOODS.find((m) => m.v === v);
 const AUTO_LOCK_MS = 60_000;
+const APP_VERSION = 3;
 
 const state = {
   entries: [],
@@ -29,6 +30,7 @@ const state = {
   txQueue: [], // entry ids waiting to be transcribed
   txBusy: false,
   txDownload: null, // 0..1 while a model is downloading
+  micId: '', // chosen microphone deviceId ('' = automatic)
 };
 
 /* ---------- helpers ---------- */
@@ -153,7 +155,7 @@ function todaysPrompt() {
 const renderPrompt = () => { $('#prompt-text').textContent = todaysPrompt(); };
 
 /* ---------- recording ---------- */
-const rec = { mr: null, stream: null, chunks: [], start: 0, timer: null, ctx: null, analyser: null, raf: 0 };
+const rec = { mr: null, stream: null, chunks: [], start: 0, timer: null, ctx: null, analyser: null, raf: 0, peak: 0, frames: 0 };
 
 function pickMime() {
   const types = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/ogg;codecs=opus', 'audio/webm'];
@@ -165,12 +167,25 @@ async function startRecording() {
     toast('This browser cannot record audio.');
     return;
   }
+  // Echo cancellation switches Android into phone-call audio mode, which hands the
+  // microphone to a connected Bluetooth device (watch, earbuds). We don't need it.
+  const base = { echoCancellation: false, noiseSuppression: false, autoGainControl: true };
   try {
-    rec.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+    try {
+      rec.stream = await navigator.mediaDevices.getUserMedia({
+        audio: state.micId ? { ...base, deviceId: { exact: state.micId } } : base,
+      });
+    } catch (err) {
+      if (!state.micId || err.name === 'NotAllowedError') throw err;
+      toast('The chosen microphone is not available, using the default one.');
+      rec.stream = await navigator.mediaDevices.getUserMedia({ audio: base });
+    }
   } catch {
     toast('Microphone access was blocked. Allow it in your browser settings.');
     return;
   }
+  rec.peak = 0;
+  rec.frames = 0;
   const mime = pickMime();
   rec.mr = new MediaRecorder(rec.stream, mime ? { mimeType: mime } : undefined);
   rec.chunks = [];
@@ -188,6 +203,7 @@ async function startRecording() {
 
   try {
     rec.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    rec.ctx.resume?.().catch(() => {});
     rec.analyser = rec.ctx.createAnalyser();
     rec.analyser.fftSize = 1024;
     rec.ctx.createMediaStreamSource(rec.stream).connect(rec.analyser);
@@ -218,6 +234,8 @@ async function onRecordingStop() {
   const type = rec.mr?.mimeType || 'audio/webm';
   const blob = new Blob(rec.chunks, { type });
   const start = rec.start;
+  // Peak is 0..128. Near zero for the whole recording means the mic sent silence.
+  const silent = rec.frames > 10 && rec.peak <= 2;
   cleanupRecorder();
   if (!blob.size || durationMs < 500) { toast('Too short, nothing saved.'); return; }
 
@@ -238,6 +256,10 @@ async function onRecordingStop() {
   requestPersistence();
   rerenderActive();
   openEditor(entry, true);
+  if (silent) {
+    $('#silence-warning').hidden = false;
+    refreshMics();
+  }
   if (entry.transcriptStatus === 'queued') queueTranscription(entry);
 }
 
@@ -272,6 +294,10 @@ function drawLiveWave() {
   const frame = () => {
     if (!rec.analyser) return;
     rec.analyser.getByteTimeDomainData(data);
+    if (rec.ctx.state === 'running') {
+      rec.frames++;
+      for (let i = 0; i < data.length; i++) rec.peak = Math.max(rec.peak, Math.abs(data[i] - 128));
+    }
     g.clearRect(0, 0, c.width, c.height);
     g.strokeStyle = color;
     g.lineWidth = 2.5 * dpr;
@@ -456,6 +482,7 @@ function openEditor(entry, isNew) {
   state.editorUrl = URL.createObjectURL(blobOf(entry));
   $('#editor-audio').src = state.editorUrl;
 
+  $('#silence-warning').hidden = true;
   $('#editor-heading').textContent = isNew ? 'Saved. Add some details?' : 'Edit entry';
   $('#editor-date').textContent = `${new Date(entry.createdAt).toLocaleString(undefined, { dateStyle: 'full', timeStyle: 'short' })} · ${fmtDuration(entry.durationMs)}`;
   $('#discard-btn').textContent = isNew ? 'Discard recording' : 'Delete entry';
@@ -832,7 +859,25 @@ async function importZip(file) {
 }
 
 /* ---------- settings ---------- */
+async function refreshMics() {
+  const sel = $('#mic-select');
+  try {
+    const devices = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'audioinput');
+    const named = devices.filter((d) => d.label);
+    sel.innerHTML = '<option value="">Automatic (phone default)</option>'
+      + named.map((d) => `<option value="${esc(d.deviceId)}">${esc(d.label)}</option>`).join('');
+    sel.value = named.some((d) => d.deviceId === state.micId) ? state.micId : '';
+    $('#mic-hint').textContent = named.length
+      ? 'If recordings come out silent while a watch or earbuds are connected, pick the phone\'s own microphone here, or turn off Bluetooth while recording.'
+      : 'Record once and allow the microphone to see the list of microphones.';
+  } catch {
+    $('#mic-hint').textContent = 'This browser cannot list microphones.';
+  }
+}
+
 async function renderSettings() {
+  refreshMics();
+  $('#app-version').textContent = `Version ${APP_VERSION}`;
   renderTxSettings();
   $('#pin-status').textContent = state.hasPin ? 'A PIN is set. The app locks on open and after 1 minute in the background.' : 'No PIN set.';
   $('#pin-current').hidden = !state.hasPin;
@@ -896,6 +941,12 @@ function bindEvents() {
   });
 
   $('#tx-model').addEventListener('change', renderTxSettings);
+  $('#mic-select').addEventListener('change', async (ev) => {
+    state.micId = ev.target.value;
+    await db.setMeta('micId', state.micId);
+    toast('Microphone saved. Record a short test to check it.');
+  });
+  $('#silence-open-settings').addEventListener('click', () => { $('#editor').close(); showView('settings'); });
   $('#tx-enable').addEventListener('click', enableTranscription);
   $('#tx-disable').addEventListener('click', disableTranscription);
   $('#tx-delete').addEventListener('click', deleteModels);
@@ -952,7 +1003,20 @@ function bindEvents() {
 
 async function init() {
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('./sw.js').catch((err) => console.warn('Service worker failed', err));
+    // When a new version is published, the new service worker takes over and we reload
+    // once so you get it right away instead of on the next launch.
+    const hadController = !!navigator.serviceWorker.controller;
+    let reloading = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hadController || reloading || rec.mr) return;
+      reloading = true;
+      location.reload();
+    });
+    navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' })
+      .then((reg) => {
+        document.addEventListener('visibilitychange', () => { if (!document.hidden) reg.update().catch(() => {}); });
+      })
+      .catch((err) => console.warn('Service worker failed', err));
   }
   renderMoodPicker();
   bindEvents();
@@ -963,6 +1027,7 @@ async function init() {
     if (state.hasPin) lock();
     state.entries = await db.allEntries();
     state.tx = { ...state.tx, ...(await db.getMeta('transcription')) };
+    state.micId = (await db.getMeta('micId')) || '';
   } catch (err) {
     toast(`Storage is unavailable: ${err.message || err}`);
   }

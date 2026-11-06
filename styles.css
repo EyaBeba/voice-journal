@@ -279,3 +279,9 @@ dialog audio { width: 100%; margin: 8px 0 4px; }
 .progress.big { height: 8px; border-radius: 4px; margin-top: 12px; }
 .progress.big i { transition: width .2s ease; }
 .card .link-btn { font-size: inherit; padding: 0; }
+
+.warning {
+  margin: 10px 0 4px; padding: 10px 12px; border-radius: 12px; font-size: .9rem;
+  background: color-mix(in srgb, var(--danger) 12%, var(--surface)); border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+}
+.warning .link-btn { font-size: inherit; padding: 0; }

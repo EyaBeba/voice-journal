@@ -137,12 +137,22 @@
       </div>
 
       <div class="card">
+        <h3>Microphone</h3>
+        <label class="field" style="margin-top:0">
+          <span class="sr-only">Microphone</span>
+          <select id="mic-select"></select>
+        </label>
+        <p id="mic-hint" class="muted small"></p>
+      </div>
+
+      <div class="card">
         <h3>Storage</h3>
         <p id="storage-status" class="muted"></p>
         <div class="row">
           <button class="btn" type="button" id="persist-btn">Keep my data safe</button>
           <button class="btn" type="button" id="install-btn" hidden>Install app</button>
         </div>
+        <p id="app-version" class="muted small"></p>
         <p class="muted small">Recordings stay in this browser on this device. Nothing is uploaded. Once loaded, the app works with no internet.</p>
       </div>
     </section>
@@ -160,6 +170,11 @@
     <form id="entry-form" method="dialog">
       <h2 id="editor-heading">Edit entry</h2>
       <p id="editor-date" class="muted small"></p>
+      <div id="silence-warning" class="warning" hidden>
+        <b>No sound was picked up.</b> If a watch or earbuds are connected by Bluetooth, they may have taken over the microphone.
+        Try turning Bluetooth off, or choose the phone's microphone in
+        <button class="link-btn" type="button" id="silence-open-settings">Settings</button>.
+      </div>
       <audio id="editor-audio" controls preload="metadata"></audio>
 
       <label class="field">
