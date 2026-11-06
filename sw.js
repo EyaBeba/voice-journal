@@ -1,5 +1,5 @@
 // Offline-first service worker: serve the app shell from cache, refresh it in the background.
-const CACHE = 'voice-journal-v4';
+const CACHE = 'voice-journal-v5';
 const ASSETS = [
   './',
   './index.html',
@@ -12,6 +12,10 @@ const ASSETS = [
   './transcriber.worker.js',
   './manifest.webmanifest',
   './icons/icon.svg',
+  './fonts/cormorant-garamond-latin-500-normal.woff2',
+  './fonts/cormorant-garamond-latin-500-italic.woff2',
+  './fonts/cormorant-garamond-latin-600-normal.woff2',
+  './fonts/inter-latin-wght-normal.woff2',
   './icons/icon-192.png',
   './icons/icon-512.png',
 ];

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Voice Journal</title>
   <meta name="description" content="A private voice journal that works offline.">
-  <meta name="theme-color" content="#0b0a12">
+  <meta name="theme-color" content="#0b0a09">
   <script>
     // Apply the saved theme before the page paints, so there is no flash.
     try {
@@ -34,7 +34,10 @@
   </div>
 
   <header class="topbar">
-    <h1>Voice Journal<span id="today-label" class="subtitle"></span></h1>
+    <div>
+      <span id="today-label" class="eyebrow"></span>
+      <h1 id="greeting">Voice Journal</h1>
+    </div>
     <div class="topbar-right">
       <span id="offline-pill" class="pill" hidden>Offline</span>
       <span id="streak-badge" class="pill streak" title="Current streak">🔥 0</span>
@@ -47,9 +50,9 @@
       <div class="prompt-card">
         <div class="prompt-head">
           <span class="eyebrow">Today's prompt</span>
-          <button id="prompt-shuffle" class="link-btn" type="button">Another one</button>
+          <p id="prompt-text"></p>
+          <button id="prompt-shuffle" class="link-btn" type="button">Another prompt</button>
         </div>
-        <p id="prompt-text"></p>
       </div>
 
       <div class="recorder">
@@ -122,6 +125,19 @@
           <span>Transcribe automatically after each recording</span>
         </label>
         <p class="muted small">Speech-to-text runs on this phone with Whisper (English). The model downloads once, which needs internet; after that it works offline and your audio never leaves the device. <button class="link-btn" type="button" id="tx-delete">Delete downloaded models</button></p>
+      </div>
+
+      <div class="card">
+        <h3>Word fixes</h3>
+        <p class="muted">Words the transcriber keeps hearing wrong. New transcripts are corrected automatically.</p>
+        <form id="fix-form" class="fix-form" autocomplete="off">
+          <input id="fix-from" type="text" maxlength="60" placeholder="Heard as" aria-label="Heard as" required>
+          <span class="arrow" aria-hidden="true">&rarr;</span>
+          <input id="fix-to" type="text" maxlength="60" placeholder="Should be" aria-label="Should be" required>
+          <button class="btn" type="submit">Add fix</button>
+        </form>
+        <ul id="fix-list" class="fix-list"></ul>
+        <button id="fix-apply" class="btn" type="button" hidden>Apply to existing transcripts</button>
       </div>
 
       <div class="card">

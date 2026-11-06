@@ -15,7 +15,7 @@ const MOODS = [
 ];
 const moodOf = (v) => MOODS.find((m) => m.v === v);
 const AUTO_LOCK_MS = 60_000;
-const APP_VERSION = 4;
+const APP_VERSION = 5;
 const PLAY_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/></svg>';
 const PAUSE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.5"/><rect x="14" y="5" width="4" height="14" rx="1.5"/></svg>';
 const EDIT_ICON = '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg>';
@@ -34,6 +34,7 @@ const state = {
   txBusy: false,
   txDownload: null, // 0..1 while a model is downloading
   micId: '', // chosen microphone deviceId ('' = automatic)
+  wordFixes: [], // [{ from, to }] applied to new transcripts
 };
 
 /* ---------- helpers ---------- */
@@ -125,7 +126,7 @@ function streaks(entries) {
 function renderStreakBadge() {
   const { current } = streaks(state.entries);
   const badge = $('#streak-badge');
-  badge.textContent = `🔥 ${current}`;
+  badge.textContent = current ? `${current}-day streak` : 'Begin today';
   badge.title = `${current}-day streak`;
 }
 
@@ -281,7 +282,7 @@ function drawIdleWave() {
   const g = c.getContext('2d');
   g.clearRect(0, 0, c.width, c.height);
   g.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--border').trim();
-  g.lineWidth = 2 * (window.devicePixelRatio || 1);
+  g.lineWidth = 1 * (window.devicePixelRatio || 1);
   g.beginPath();
   g.moveTo(0, c.height / 2);
   g.lineTo(c.width, c.height / 2);
@@ -558,7 +559,7 @@ async function runQueue() {
         onTranscriptChange(entry);
         try {
           const text = await transcribe(state.tx.model, entry.audio);
-          entry.transcript = text;
+          entry.transcript = applyWordFixes(text);
           entry.transcriptStatus = 'done';
           delete entry.transcriptError;
         } catch (err) {
@@ -582,6 +583,62 @@ function onTranscriptChange(entry, finished = false) {
     if (finished && !state.editing.transcriptDirty) $('#entry-form').elements.transcript.value = entry.transcript || '';
     renderEditorTranscript(entry);
   }
+  rerenderActive();
+}
+
+/* ---------- word fixes ---------- */
+const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+function applyWordFixes(text) {
+  let out = text || '';
+  for (const { from, to } of state.wordFixes) {
+    const re = new RegExp(`(^|[^\\p{L}\\p{N}'])(${escapeRegex(from)})(?=$|[^\\p{L}\\p{N}'])`, 'giu');
+    out = out.replace(re, (m, pre, word, offset, whole) => {
+      // Capitalize only at the start of a sentence; otherwise keep the spelling as typed.
+      const before = whole.slice(0, offset + pre.length).trimEnd();
+      const sentenceStart = before === '' || /[.!?]$/.test(before);
+      return pre + (sentenceStart ? to[0].toUpperCase() + to.slice(1) : to);
+    });
+  }
+  return out;
+}
+
+function renderWordFixes() {
+  $('#fix-list').innerHTML = state.wordFixes.map((f, i) => `
+    <li><span><span class="from">${esc(f.from)}</span><span class="sep">&rarr;</span><span class="to">${esc(f.to)}</span></span>
+      <button class="icon-btn" type="button" data-fix="${i}" aria-label="Remove fix for ${esc(f.from)}">&times;</button></li>`).join('');
+  $('#fix-apply').hidden = !state.wordFixes.length || !state.entries.some((e) => e.transcript);
+}
+
+async function saveWordFixes() {
+  await db.setMeta('wordFixes', state.wordFixes);
+  renderWordFixes();
+}
+
+async function onAddFix(ev) {
+  ev.preventDefault();
+  const from = $('#fix-from').value.trim();
+  const to = $('#fix-to').value.trim();
+  if (!from || !to) return;
+  state.wordFixes = state.wordFixes.filter((f) => f.from.toLowerCase() !== from.toLowerCase());
+  state.wordFixes.push({ from, to });
+  $('#fix-form').reset();
+  await saveWordFixes();
+  toast(`“${from}” will now be written as “${to}”.`);
+}
+
+async function applyFixesToExisting() {
+  let changed = 0;
+  for (const e of state.entries) {
+    if (!e.transcript) continue;
+    const fixed = applyWordFixes(e.transcript);
+    if (fixed !== e.transcript) {
+      e.transcript = fixed;
+      await db.putEntry(e);
+      changed++;
+    }
+  }
+  toast(changed ? `Fixed ${changed} transcript${changed === 1 ? '' : 's'}.` : 'Nothing to fix in your transcripts.');
   rerenderActive();
 }
 
@@ -693,7 +750,7 @@ function renderCalendar() {
   const { current, longest } = streaks(state.entries);
   const totalMs = state.entries.reduce((s, e) => s + e.durationMs, 0);
   $('#stats').innerHTML = [
-    [`🔥 ${current}`, 'Current streak (days)'],
+    [current, 'Day streak'],
     [longest, 'Longest streak'],
     [state.entries.length, 'Entries'],
     [fmtTotal(totalMs), 'Time recorded'],
@@ -883,6 +940,7 @@ async function renderSettings() {
   refreshMics();
   $('#app-version').textContent = `Version ${APP_VERSION}`;
   renderTxSettings();
+  renderWordFixes();
   $('#pin-status').textContent = state.hasPin ? 'A PIN is set. The app locks on open and after 1 minute in the background.' : 'No PIN set.';
   $('#pin-current').hidden = !state.hasPin;
   $('#pin-remove').hidden = !state.hasPin;
@@ -906,6 +964,17 @@ async function renderSettings() {
 
 /* ---------- init ---------- */
 let installPrompt = null;
+
+/* ---------- header ---------- */
+function renderGreeting() {
+  const now = new Date();
+  const h = now.getHours();
+  const part = h < 5 ? 'Good night' : h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : h < 22 ? 'Good evening' : 'Good night';
+  $('#greeting').textContent = part;
+  const weekday = now.toLocaleDateString(undefined, { weekday: 'long' });
+  const date = now.toLocaleDateString(undefined, { month: 'long', day: 'numeric' });
+  $('#today-label').textContent = `${weekday} · ${date}`;
+}
 
 /* ---------- theme ---------- */
 function readTheme() {
@@ -963,6 +1032,14 @@ function bindEvents() {
   });
 
   $('#tx-model').addEventListener('change', renderTxSettings);
+  $('#fix-form').addEventListener('submit', onAddFix);
+  $('#fix-apply').addEventListener('click', applyFixesToExisting);
+  $('#fix-list').addEventListener('click', async (ev) => {
+    const btn = ev.target.closest('[data-fix]');
+    if (!btn) return;
+    state.wordFixes.splice(Number(btn.dataset.fix), 1);
+    await saveWordFixes();
+  });
   $('#mic-select').addEventListener('change', async (ev) => {
     state.micId = ev.target.value;
     await db.setMeta('micId', state.micId);
@@ -1016,6 +1093,7 @@ function bindEvents() {
   syncOnline();
 
   document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) renderGreeting();
     if (document.hidden) state.hiddenAt = Date.now();
     else if (state.hiddenAt && Date.now() - state.hiddenAt > AUTO_LOCK_MS && !rec.mr) lock();
   });
@@ -1041,7 +1119,7 @@ async function init() {
       .catch((err) => console.warn('Service worker failed', err));
   }
   applyTheme(readTheme());
-  $('#today-label').textContent = new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+  renderGreeting();
   renderMoodPicker();
   bindEvents();
   renderPrompt();
@@ -1052,6 +1130,7 @@ async function init() {
     state.entries = await db.allEntries();
     state.tx = { ...state.tx, ...(await db.getMeta('transcription')) };
     state.micId = (await db.getMeta('micId')) || '';
+    state.wordFixes = (await db.getMeta('wordFixes')) || [];
   } catch (err) {
     toast(`Storage is unavailable: ${err.message || err}`);
   }
