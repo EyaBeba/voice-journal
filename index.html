@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Voice Journal</title>
+  <meta name="description" content="A private voice journal that works offline.">
+  <meta name="theme-color" content="#e2553f">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <!-- Lock screen -->
+  <div id="lock" class="lock" hidden>
+    <form id="lock-form" class="lock-card" autocomplete="off">
+      <div class="lock-icon" aria-hidden="true">🔒</div>
+      <h2>Journal locked</h2>
+      <label for="lock-pin" class="sr-only">PIN</label>
+      <input id="lock-pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" placeholder="Enter PIN" required>
+      <p id="lock-error" class="error" aria-live="polite"></p>
+      <button class="btn primary" type="submit">Unlock</button>
+    </form>
+  </div>
+
+  <header class="topbar">
+    <h1>Voice Journal</h1>
+    <div class="topbar-right">
+      <span id="offline-pill" class="pill" hidden>Offline</span>
+      <span id="streak-badge" class="pill streak" title="Current streak">🔥 0</span>
+    </div>
+  </header>
+
+  <main>
+    <!-- Record -->
+    <section id="view-record" class="view active" aria-label="Record">
+      <div class="prompt-card">
+        <div class="prompt-head">
+          <span class="eyebrow">Today's prompt</span>
+          <button id="prompt-shuffle" class="link-btn" type="button">Another one</button>
+        </div>
+        <p id="prompt-text"></p>
+      </div>
+
+      <div class="recorder">
+        <canvas id="wave" aria-hidden="true"></canvas>
+        <div id="timer" class="timer">0:00</div>
+        <button id="rec-btn" class="rec-btn" type="button" aria-label="Start recording"><span></span></button>
+        <p id="rec-hint" class="hint">Tap to start recording</p>
+      </div>
+
+      <div id="recent" class="recent"></div>
+    </section>
+
+    <!-- Journal -->
+    <section id="view-journal" class="view" aria-label="Journal">
+      <div class="filters">
+        <input id="search" type="search" placeholder="Search titles, tags, prompts">
+        <div class="filter-row">
+          <select id="filter-mood" aria-label="Filter by mood"></select>
+          <select id="filter-tag" aria-label="Filter by tag"></select>
+        </div>
+        <button id="day-chip" class="chip active" type="button" hidden></button>
+      </div>
+      <div id="entry-list"></div>
+    </section>
+
+    <!-- Calendar -->
+    <section id="view-calendar" class="view" aria-label="Calendar">
+      <div id="stats" class="stats"></div>
+      <div class="card">
+        <div class="cal-head">
+          <button id="cal-prev" class="icon-btn" type="button" aria-label="Previous month">‹</button>
+          <h2 id="cal-title"></h2>
+          <button id="cal-next" class="icon-btn" type="button" aria-label="Next month">›</button>
+        </div>
+        <div id="cal-grid" class="cal-grid"></div>
+        <div class="cal-legend"><span>Less</span><i class="l0"></i><i class="l1"></i><i class="l2"></i><i class="l3"></i><i class="l4"></i><span>More</span></div>
+      </div>
+      <div class="card">
+        <h3>Mood, last 30 days</h3>
+        <div id="mood-bars" class="mood-bars"></div>
+      </div>
+    </section>
+
+    <!-- Settings -->
+    <section id="view-settings" class="view" aria-label="Settings">
+      <div class="card">
+        <h3>PIN lock</h3>
+        <p id="pin-status" class="muted"></p>
+        <form id="pin-form" class="stack" autocomplete="off">
+          <input id="pin-current" type="password" inputmode="numeric" maxlength="8" placeholder="Current PIN">
+          <input id="pin-new" type="password" inputmode="numeric" maxlength="8" placeholder="New PIN (4–8 digits)">
+          <input id="pin-confirm" type="password" inputmode="numeric" maxlength="8" placeholder="Confirm new PIN">
+          <p id="pin-error" class="error" aria-live="polite"></p>
+          <div class="row">
+            <button class="btn primary" type="submit" id="pin-save">Set PIN</button>
+            <button class="btn" type="button" id="pin-remove" hidden>Remove PIN</button>
+            <button class="btn" type="button" id="lock-now" hidden>Lock now</button>
+          </div>
+        </form>
+        <p class="muted small">The PIN keeps people who pick up your device out of the app. It does not encrypt files.</p>
+      </div>
+
+      <div class="card">
+        <h3>Backup</h3>
+        <p id="backup-status" class="muted"></p>
+        <div class="row">
+          <button class="btn primary" type="button" id="export-btn">Export .zip</button>
+          <label class="btn" for="import-file">Import .zip</label>
+          <input id="import-file" type="file" accept=".zip,application/zip" hidden>
+        </div>
+        <p class="muted small">A backup holds every recording plus a <code>journal.json</code> with titles, moods, tags and prompts. Importing skips entries you already have.</p>
+      </div>
+
+      <div class="card">
+        <h3>Storage</h3>
+        <p id="storage-status" class="muted"></p>
+        <div class="row">
+          <button class="btn" type="button" id="persist-btn">Keep my data safe</button>
+          <button class="btn" type="button" id="install-btn" hidden>Install app</button>
+        </div>
+        <p class="muted small">Recordings stay in this browser on this device. Nothing is uploaded. Once loaded, the app works with no internet.</p>
+      </div>
+    </section>
+  </main>
+
+  <nav class="tabs" aria-label="Sections">
+    <button type="button" data-view="record" aria-current="page"><span aria-hidden="true">🎙️</span>Record</button>
+    <button type="button" data-view="journal"><span aria-hidden="true">📖</span>Journal</button>
+    <button type="button" data-view="calendar"><span aria-hidden="true">📅</span>Calendar</button>
+    <button type="button" data-view="settings"><span aria-hidden="true">⚙️</span>Settings</button>
+  </nav>
+
+  <!-- Entry editor -->
+  <dialog id="editor">
+    <form id="entry-form" method="dialog">
+      <h2 id="editor-heading">Edit entry</h2>
+      <p id="editor-date" class="muted small"></p>
+      <audio id="editor-audio" controls preload="metadata"></audio>
+
+      <label class="field">
+        <span>Title</span>
+        <input name="entryTitle" type="text" maxlength="120" placeholder="Give it a name (optional)">
+      </label>
+
+      <fieldset class="field">
+        <legend>Mood</legend>
+        <div id="mood-picker" class="mood-picker"></div>
+      </fieldset>
+
+      <label class="field">
+        <span>Tags</span>
+        <input name="tags" type="text" placeholder="work, family, ideas">
+      </label>
+      <div id="tag-suggestions" class="chips"></div>
+
+      <label id="editor-prompt" class="check">
+        <input name="usePrompt" type="checkbox">
+        <span>Answering: <em id="editor-prompt-text"></em></span>
+      </label>
+
+      <div class="row end">
+        <button id="discard-btn" class="btn danger" type="button">Delete</button>
+        <button class="btn primary" type="submit" value="save">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
