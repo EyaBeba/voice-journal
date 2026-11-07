@@ -47,6 +47,13 @@
   <main>
     <!-- Record -->
     <section id="view-record" class="view active" aria-label="Record">
+      <div id="backup-banner" class="banner" hidden>
+        <p id="backup-banner-text"></p>
+        <div class="row">
+          <button class="btn primary" type="button" id="backup-now">Back up now</button>
+          <button class="btn" type="button" id="backup-later">Later</button>
+        </div>
+      </div>
       <div class="prompt-card">
         <div class="prompt-head">
           <span class="eyebrow">Today's prompt</span>
@@ -161,7 +168,8 @@
         <h3>Backup</h3>
         <p id="backup-status" class="muted"></p>
         <div class="row">
-          <button class="btn primary" type="button" id="export-btn">Export .zip</button>
+          <button class="btn primary" type="button" id="share-btn" hidden>Save to Drive…</button>
+          <button class="btn" type="button" id="export-btn">Download .zip</button>
           <label class="btn" for="import-file">Import .zip</label>
           <input id="import-file" type="file" accept=".zip,application/zip" hidden>
         </div>

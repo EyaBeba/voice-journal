@@ -15,7 +15,7 @@ const MOODS = [
 ];
 const moodOf = (v) => MOODS.find((m) => m.v === v);
 const AUTO_LOCK_MS = 60_000;
-const APP_VERSION = 8;
+const APP_VERSION = 9;
 const PLAY_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/></svg>';
 const PAUSE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.5"/><rect x="14" y="5" width="4" height="14" rx="1.5"/></svg>';
 const EDIT_ICON = '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg>';
@@ -143,6 +143,7 @@ function showView(name) {
 
 function rerenderActive() {
   renderStreakBadge();
+  renderBackupBanner();
   const active = $('.view.active')?.id.replace('view-', '');
   if (active === 'record') renderRecent();
   if (active === 'journal') renderJournal();
@@ -193,10 +194,36 @@ async function startRecording() {
   const mime = pickMime();
   rec.mr = new MediaRecorder(rec.stream, mime ? { mimeType: mime } : undefined);
   rec.chunks = [];
-  rec.mr.ondataavailable = (e) => { if (e.data.size) rec.chunks.push(e.data); };
+  // Crash-safe: every second of audio is also written to the phone's storage, so a crash,
+  // a call or a dead battery can't lose the note. It is recovered on the next launch.
+  rec.draftId = uid();
+  rec.seq = 0;
+  rec.saveChain = Promise.resolve();
+  rec.mr.ondataavailable = (e) => {
+    if (!e.data.size) return;
+    rec.chunks.push(e.data);
+    const { draftId } = rec;
+    const seq = rec.seq++;
+    rec.saveChain = rec.saveChain
+      .then(() => e.data.arrayBuffer())
+      .then((buf) => db.putChunk(draftId, seq, buf))
+      .catch((err) => console.warn('Could not save audio piece', err));
+  };
   rec.mr.onstop = onRecordingStop;
   rec.mr.start(1000);
   rec.start = Date.now();
+  db.setMeta('draft', { id: rec.draftId, start: rec.start, mime: rec.mr.mimeType || mime || 'audio/webm', prompt: todaysPrompt() })
+    .catch(() => {});
+  // If the mic is taken away (a phone call, Bluetooth change), keep what was recorded.
+  rec.stream.getAudioTracks().forEach((track) => {
+    track.addEventListener('ended', () => {
+      if (rec.mr && rec.mr.state !== 'inactive') {
+        toast('Recording was interrupted. What you said so far is saved.');
+        stopRecording();
+      }
+    });
+  });
+  keepScreenOn(true);
 
   const btn = $('#rec-btn');
   btn.classList.add('recording');
@@ -219,7 +246,50 @@ function stopRecording() {
   if (rec.mr && rec.mr.state !== 'inactive') rec.mr.stop();
 }
 
+/* Keep the screen awake while recording, so the phone doesn't sleep mid-sentence. */
+let wakeLock = null;
+async function keepScreenOn(on) {
+  try {
+    if (on && navigator.wakeLock && !wakeLock) {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    } else if (!on && wakeLock) {
+      await wakeLock.release();
+      wakeLock = null;
+    }
+  } catch { /* not supported or not allowed right now */ }
+}
+
+/** Turn audio saved during an interrupted recording back into a journal entry. */
+async function recoverDraft() {
+  const draft = await db.getMeta('draft');
+  if (!draft || rec.mr) return;
+  try {
+    if (!state.entries.some((e) => e.id === draft.id)) {
+      const pieces = await db.getChunks(draft.id);
+      if (pieces.length) {
+        const entry = {
+          id: draft.id, createdAt: draft.start, durationMs: pieces.length * 1000, mime: draft.mime,
+          title: '', mood: null, tags: [], prompt: draft.prompt || null, recovered: true,
+          transcript: '', transcriptStatus: state.tx.enabled && state.tx.auto ? 'queued' : null,
+          audio: await new Blob(pieces, { type: draft.mime }).arrayBuffer(),
+        };
+        await db.putEntry(entry);
+        state.entries.unshift(entry);
+        state.entries.sort((a, b) => b.createdAt - a.createdAt);
+        toast('Recovered a recording that was interrupted.');
+        if (entry.transcriptStatus === 'queued') queueTranscription(entry);
+      }
+    }
+    await db.deleteChunks(draft.id);
+    await db.deleteMeta('draft');
+  } catch (err) {
+    console.warn('Could not recover recording', err);
+  }
+}
+
 function cleanupRecorder() {
+  keepScreenOn(false);
   clearInterval(rec.timer);
   cancelAnimationFrame(rec.raf);
   rec.stream?.getTracks().forEach((t) => t.stop());
@@ -238,14 +308,17 @@ async function onRecordingStop() {
   const type = rec.mr?.mimeType || 'audio/webm';
   const blob = new Blob(rec.chunks, { type });
   const start = rec.start;
+  const draftId = rec.draftId;
+  const saved = rec.saveChain;
   // Peak is 0..128. Near zero for the whole recording means the mic sent silence.
   const silent = rec.frames > 10 && rec.peak <= 2;
   cleanupRecorder();
-  if (!blob.size || durationMs < 500) { toast('Too short, nothing saved.'); return; }
+  const clearDraft = () => saved.then(() => db.deleteChunks(draftId)).then(() => db.deleteMeta('draft')).catch(() => {});
+  if (!blob.size || durationMs < 500) { toast('Too short, nothing saved.'); clearDraft(); return; }
 
   // Save immediately so nothing is lost; details are added afterwards.
   const entry = {
-    id: uid(), createdAt: start, durationMs, mime: type,
+    id: draftId, createdAt: start, durationMs, mime: type,
     title: '', mood: null, tags: [], prompt: todaysPrompt(),
     transcript: '', transcriptStatus: state.tx.enabled && state.tx.auto ? 'queued' : null,
     audio: await blob.arrayBuffer(),
@@ -253,9 +326,11 @@ async function onRecordingStop() {
   try {
     await db.putEntry(entry);
   } catch (err) {
+    // The audio pieces stay saved and will be recovered next time the app opens.
     toast(`Could not save: ${err.message || err}`);
     return;
   }
+  clearDraft();
   state.entries.unshift(entry);
   requestPersistence();
   rerenderActive();
@@ -546,6 +621,7 @@ function entryCard(e) {
 }
 
 function transcriptLine(e) {
+  if (e.summary) return `<div class="entry-transcript entry-summary">${esc(e.summary)}</div>`;
   if (e.transcript) return `<div class="entry-transcript">${esc(e.transcript)}</div>`;
   if (e.transcriptStatus === 'working') return '<div class="entry-status">✍️ Transcribing…</div>';
   if (e.transcriptStatus === 'queued') return '<div class="entry-status">✍️ Waiting to transcribe…</div>';
@@ -590,7 +666,7 @@ function renderJournal() {
     (!state.filterDay || dayKey(e.createdAt) === state.filterDay)
     && (!mood || e.mood === mood)
     && (!tag || e.tags.includes(tag))
-    && (!q || [e.title, e.prompt, e.transcript, ...e.tags].join(' ').toLowerCase().includes(q)));
+    && (!q || [e.title, e.prompt, e.transcript, e.summary, ...e.tags].join(' ').toLowerCase().includes(q)));
 
   const chip = $('#day-chip');
   chip.hidden = !state.filterDay;
@@ -670,6 +746,7 @@ async function saveEditor(ev) {
       const edited = f.elements.transcript.value.trim();
       if (edited !== entry.transcript) { entry.segments = null; entry.words = null; }
       entry.transcript = edited;
+      entry.summary = autoSummary(edited);
       if (entry.transcript) entry.transcriptStatus = 'done';
     }
     try {
@@ -742,6 +819,60 @@ function retryFailedTranscriptions() {
     .forEach((e) => queueTranscription(e));
 }
 
+/* ---------- automatic titles & summaries (simple, on-device, no AI service) ---------- */
+const STOPWORDS = new Set(('a an and are as at be been but by did do does for from had has have he her his i if in into is it '
+  + 'its just me my myself of on or our so some than that the their them then there these they this to too um uh us very '
+  + 'was we were what when which who will with would you your really like also about am can could get got going go want '
+  + 'today yeah okay ok well because more much one out up all how know think thing things lot').split(' '));
+const FILLER_START = /^(?:(?:so|um+|uh+|well|okay|ok|like|yeah|right|and|hmm+|alright|hi|hello)[,.!]?\s+)+/i;
+
+function sentencesOf(text) {
+  return (text.match(/[^.!?]+[.!?]*["”']?/g) || []).map((x) => x.trim()).filter(Boolean);
+}
+
+/** A short title from the first thing you said. */
+function autoTitle(text) {
+  const clean = (x) => x.replace(FILLER_START, '').replace(/[.!?,;:…]+$/, '').trim();
+  // Skip openers like "Okay." or "So, um." and use the first real sentence.
+  const first = sentencesOf(text || '').map(clean).find((x) => x.split(/\s+/).length >= 2)
+    || clean(text || '');
+  const words = first.split(/\s+/).filter(Boolean);
+  if (!words.length) return '';
+  let cut = words.slice(0, 7);
+  if (words.length > 7) {
+    // don't end on a dangling small word ("…day at…")
+    while (cut.length > 3 && STOPWORDS.has(cut[cut.length - 1].toLowerCase().replace(/[^\p{L}']/gu, ''))) cut.pop();
+  }
+  let title = cut.join(' ').replace(/[,;:]$/, '');
+  if (words.length > cut.length) title += '…';
+  if (!title.replace(FILLER_START, '').trim() || !(title + ' ').replace(FILLER_START, '').trim()) return ''; // only filler words
+  return title[0].toUpperCase() + title.slice(1);
+}
+
+/** For longer notes: the one or two sentences that best cover what the note is about. */
+function autoSummary(text) {
+  const sentences = sentencesOf(text || '');
+  if (sentences.length < 3 || text.split(/\s+/).length < 35) return '';
+  const words = (x) => x.toLowerCase().match(/[\p{L}']+/gu)?.filter((w) => w.length > 2 && !STOPWORDS.has(w)) || [];
+  const freq = new Map();
+  for (const w of words(text)) freq.set(w, (freq.get(w) || 0) + 1);
+  const scored = sentences.map((sen, i) => {
+    const ws = words(sen);
+    const score = ws.reduce((n, w) => n + (freq.get(w) - 1), 0) / Math.sqrt(ws.length + 1) + (i === 0 ? 0.3 : 0);
+    return { sen, i, score };
+  });
+  const top = scored.sort((a, b) => b.score - a.score).slice(0, 2).sort((a, b) => a.i - b.i);
+  let summary = top.map((x) => x.sen).join(' ');
+  if (summary.length > 180) summary = top.sort((a, b) => b.score - a.score)[0].sen;
+  return summary.length > 200 ? `${summary.slice(0, 197).trimEnd()}…` : summary;
+}
+
+function addAutoText(entry) {
+  if (!entry.transcript) return;
+  if (!entry.title) { entry.title = autoTitle(entry.transcript); entry.titleAuto = !!entry.title; }
+  entry.summary = autoSummary(entry.transcript);
+}
+
 async function runQueue() {
   if (state.txBusy) return;
   state.txBusy = true;
@@ -759,6 +890,7 @@ async function runQueue() {
           entry.transcriptStatus = 'done';
           delete entry.transcriptError;
           delete entry.txAttempts;
+          addAutoText(entry);
         } catch (err) {
           console.warn('Transcription failed', err);
           entry.transcriptStatus = 'error';
@@ -782,6 +914,8 @@ function onTranscriptChange(entry, finished = false) {
   if (player.id === entry.id) $(`.entry[data-id="${CSS.escape(entry.id)}"] .reader`)?.remove();
   if (state.editing?.id === entry.id && $('#editor').open) {
     if (finished && !state.editing.transcriptDirty) $('#entry-form').elements.transcript.value = entry.transcript || '';
+    const titleInput = $('#entry-form').elements.entryTitle;
+    if (finished && !titleInput.value.trim() && entry.title) titleInput.value = entry.title;
     renderEditorTranscript(entry);
   }
   rerenderActive();
@@ -1128,19 +1262,64 @@ async function onPinRemove() {
 /* ---------- backup ---------- */
 async function exportZip() {
   if (!state.entries.length) { toast('Nothing to export yet.'); return; }
+  download(buildBackup(), `voice-journal-${dayKey(Date.now())}.zip`);
+  await markBackedUp();
+}
+
+function buildBackup() {
   const files = [];
   const meta = [];
   for (const e of state.entries) {
     const name = `audio/${dayKey(e.createdAt)}_${e.id}.${extFor(e.mime)}`;
     files.push({ name, data: new Uint8Array(e.audio) });
-    const { audio, transcriptStatus, transcriptError, ...rest } = e;
+    const { audio, transcriptStatus, transcriptError, txAttempts, ...rest } = e;
     meta.push({ ...rest, audioFile: name });
   }
   const manifest = { app: 'voice-journal', version: 1, exportedAt: new Date().toISOString(), entries: meta };
   files.unshift({ name: 'journal.json', data: new TextEncoder().encode(JSON.stringify(manifest, null, 2)) });
-  download(createZip(files), `voice-journal-${dayKey(Date.now())}.zip`);
-  await db.setMeta('lastExport', Date.now());
+  return createZip(files);
+}
+
+function canShareFiles() {
+  try {
+    return !!navigator.canShare?.({ files: [new File([''], 'x.zip', { type: 'application/zip' })] });
+  } catch { return false; }
+}
+
+/** Save the backup somewhere else via the phone's share sheet (e.g. Google Drive). */
+async function shareZip() {
+  if (!state.entries.length) { toast('Nothing to back up yet.'); return; }
+  const blob = buildBackup();
+  const file = new File([blob], `voice-journal-${dayKey(Date.now())}.zip`, { type: 'application/zip' });
+  try {
+    await navigator.share({ files: [file], title: 'Voice Journal backup' });
+    await markBackedUp();
+  } catch (err) {
+    if (err.name !== 'AbortError') { download(blob, file.name); await markBackedUp(); }
+  }
+}
+
+async function markBackedUp() {
+  state.lastExport = Date.now();
+  await db.setMeta('lastExport', state.lastExport);
+  renderBackupBanner();
   renderSettings();
+}
+
+const notBackedUp = () => state.entries.filter((e) => e.createdAt > (state.lastExport || 0)).length;
+
+/** A gentle reminder on the Record screen when notes exist only on this phone. */
+function renderBackupBanner() {
+  const banner = $('#backup-banner');
+  const pending = notBackedUp();
+  const week = 7 * 86_400_000;
+  const due = state.lastExport ? Date.now() - state.lastExport > week : state.entries.length >= 3;
+  const snoozed = (state.backupSnoozeUntil || 0) > Date.now();
+  banner.hidden = !(pending && due && !snoozed);
+  if (!banner.hidden) {
+    $('#backup-banner-text').textContent = `${pending} note${pending === 1 ? ' isn’t' : 's aren’t'} backed up yet. `
+      + 'Your journal lives only on this phone.';
+  }
 }
 
 async function importZip(file) {
@@ -1164,6 +1343,7 @@ async function importZip(file) {
         tags: Array.isArray(m.tags) ? m.tags.filter((t) => typeof t === 'string') : [],
         prompt: typeof m.prompt === 'string' ? m.prompt : null,
         transcript: typeof m.transcript === 'string' ? m.transcript : '',
+        summary: typeof m.summary === 'string' ? m.summary : '',
         words: Array.isArray(m.words)
           ? m.words.filter((x) => x && typeof x.w === 'string' && typeof x.s === 'number')
             .map((x) => ({ w: x.w, s: x.s, e: typeof x.e === 'number' ? x.e : null }))
@@ -1220,10 +1400,13 @@ async function renderSettings() {
   $('#lock-now').hidden = !state.hasPin;
   $('#pin-save').textContent = state.hasPin ? 'Change PIN' : 'Set PIN';
 
-  const last = await db.getMeta('lastExport');
-  $('#backup-status').textContent = last
+  const last = state.lastExport;
+  const pending = notBackedUp();
+  $('#backup-status').textContent = (last
     ? `Last backup: ${new Date(last).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}.`
-    : 'No backup yet. Export now and then so a lost phone or cleared browser doesn\'t take your journal with it.';
+    : 'No backup yet. Your notes live only on this phone, so back up now and then.')
+    + (pending ? ` ${pending} note${pending === 1 ? '' : 's'} not backed up.` : ' Everything is backed up.');
+  $('#share-btn').hidden = !canShareFiles();
 
   const bytes = state.entries.reduce((s, e) => s + e.audio.byteLength, 0);
   let text = `${state.entries.length} entries using ${fmtBytes(bytes)}.`;
@@ -1342,6 +1525,13 @@ function bindEvents() {
   $('#lock-now').addEventListener('click', lock);
 
   $('#export-btn').addEventListener('click', exportZip);
+  $('#share-btn').addEventListener('click', shareZip);
+  $('#backup-now').addEventListener('click', () => (canShareFiles() ? shareZip() : exportZip()));
+  $('#backup-later').addEventListener('click', async () => {
+    state.backupSnoozeUntil = Date.now() + 3 * 86_400_000;
+    await db.setMeta('backupSnoozeUntil', state.backupSnoozeUntil);
+    renderBackupBanner();
+  });
   $('#import-file').addEventListener('change', (ev) => {
     const file = ev.target.files[0];
     ev.target.value = '';
@@ -1372,6 +1562,7 @@ function bindEvents() {
 
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) renderGreeting();
+    if (!document.hidden && rec.mr) keepScreenOn(true); // the lock is dropped when the app is hidden
     if (document.hidden) state.hiddenAt = Date.now();
     else if (state.hiddenAt && Date.now() - state.hiddenAt > AUTO_LOCK_MS && !rec.mr) lock();
   });
@@ -1412,11 +1603,19 @@ async function init() {
     state.txNeedsUpdate = state.tx.enabled && !!LEGACY_MODELS[state.tx.model];
     state.micId = (await db.getMeta('micId')) || '';
     state.wordFixes = (await db.getMeta('wordFixes')) || [];
+    state.lastExport = (await db.getMeta('lastExport')) || 0;
+    state.backupSnoozeUntil = (await db.getMeta('backupSnoozeUntil')) || 0;
+    await recoverDraft();
+    // Give older transcribed notes a title and summary once.
+    for (const e of state.entries) {
+      if (e.transcript && !e.title && e.summary === undefined) { addAutoText(e); await db.putEntry(e); }
+    }
   } catch (err) {
     toast(`Storage is unavailable: ${err.message || err}`);
   }
   renderStreakBadge();
   renderRecent();
+  renderBackupBanner();
   if (state.txNeedsUpdate) updateModelInBackground();
   window.addEventListener('online', retryFailedTranscriptions);
   if (state.tx.enabled) {

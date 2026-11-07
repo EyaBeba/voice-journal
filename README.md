@@ -8,6 +8,10 @@ A private voice journal that works offline. It installs like an app on your phon
 - **Daily prompts** to get you talking, with an "Another one" button for a different prompt.
 - **Mood and tags** on every entry, plus search and filters in the Journal tab.
 - **Offline transcription.** Speech-to-text runs on your phone with Whisper (English). Turn it on in Settings and pick Tiny (~65 MB), Base (~80 MB) or Small (~250 MB). The model downloads once; after that every note is transcribed automatically, with no internet, and you can search by what you said. You can edit the transcript, and **Word fixes** in Settings corrects words it keeps mishearing (for example "Jonah" to "journal").
+- **Follow-along playback.** Tap play and each word lights up as it's spoken; tap a word to jump there.
+- **Automatic titles and summaries.** Each transcribed note gets a title from what you said first, and longer notes a one-line summary (worked out on the phone, no online service).
+- **Crash-safe recording.** Audio is saved every second while you record, so a crash, call or dead battery doesn't lose the note; the screen stays awake while recording.
+- **Backup reminders.** A reminder appears when notes aren't backed up; on Android you can save the backup straight to Google Drive from the share sheet.
 - **Streaks and a calendar heatmap.** Tap a day to see its entries. A chart shows your moods over the last 30 days.
 - **PIN lock.** The app locks when you open it and after 1 minute in the background.
 - **Zip backup and restore.** A backup holds every recording plus `journal.json`. Importing skips entries you already have.

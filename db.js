@@ -1,6 +1,6 @@
 // Tiny IndexedDB wrapper. Everything lives on this device.
 const DB_NAME = 'voice-journal';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 let dbPromise;
 
 function open() {
@@ -13,6 +13,8 @@ function open() {
         store.createIndex('createdAt', 'createdAt');
       }
       if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta');
+      // v2: audio pieces saved every second while recording, so a crash can't lose a note
+      if (!db.objectStoreNames.contains('chunks')) db.createObjectStore('chunks', { keyPath: ['draft', 'seq'] });
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -39,3 +41,11 @@ export const deleteEntry = (id) => run('entries', 'readwrite', (s) => s.delete(i
 export const getMeta = (key) => run('meta', 'readonly', (s) => s.get(key));
 export const setMeta = (key, value) => run('meta', 'readwrite', (s) => s.put(value, key));
 export const deleteMeta = (key) => run('meta', 'readwrite', (s) => s.delete(key));
+
+// Recording drafts: { draft, seq, data: ArrayBuffer }
+export const putChunk = (draft, seq, data) => run('chunks', 'readwrite', (s) => s.put({ draft, seq, data }));
+export const getChunks = (draft) =>
+  run('chunks', 'readonly', (s) => s.getAll(IDBKeyRange.bound([draft, 0], [draft, Infinity])))
+    .then((list) => list.sort((a, b) => a.seq - b.seq).map((c) => c.data));
+export const deleteChunks = (draft) =>
+  run('chunks', 'readwrite', (s) => s.delete(IDBKeyRange.bound([draft, 0], [draft, Infinity])));
