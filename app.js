@@ -1,7 +1,7 @@
 import * as db from './db.js';
 import { createZip, readZip } from './zip.js';
 import { PROMPTS } from './prompts.js';
-import { MODELS, DEFAULT_MODEL, LEGACY_MODELS, loadModel, transcribe } from './transcribe.js';
+import { MODELS, DEFAULT_MODEL, LEGACY_MODELS, currentModelFor, downloadedModels, loadModel, transcribe } from './transcribe.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -15,7 +15,7 @@ const MOODS = [
 ];
 const moodOf = (v) => MOODS.find((m) => m.v === v);
 const AUTO_LOCK_MS = 60_000;
-const APP_VERSION = 7;
+const APP_VERSION = 8;
 const PLAY_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/></svg>';
 const PAUSE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.5"/><rect x="14" y="5" width="4" height="14" rx="1.5"/></svg>';
 const EDIT_ICON = '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg>';
@@ -711,6 +711,37 @@ async function queueTranscription(entry) {
   runQueue();
 }
 
+/**
+ * Use the chosen model if it's on the phone (or we can download it). Otherwise, or if it
+ * fails, use any model that is already saved, so transcription keeps working offline.
+ */
+async function transcribeWithFallback(audio) {
+  const downloaded = await downloadedModels();
+  const want = state.tx.model;
+  const sameSize = Object.keys(LEGACY_MODELS).filter((id) => currentModelFor(id) === currentModelFor(want));
+  const alternatives = [currentModelFor(want), ...sameSize, ...downloaded]
+    .filter((id, i, all) => id !== want && all.indexOf(id) === i && downloaded.includes(id));
+  const first = downloaded.includes(want) || navigator.onLine ? want : alternatives.shift();
+  if (!first) throw new Error('no model downloaded');
+  try {
+    return await transcribe(first, audio);
+  } catch (err) {
+    const next = alternatives.find((id) => id !== first);
+    if (!next) throw err;
+    console.warn(`Model ${first} failed, using ${next}`, err);
+    return transcribe(next, audio);
+  }
+}
+
+/** Try failed transcriptions again (on launch, when back online, after a model download). */
+function retryFailedTranscriptions() {
+  if (!state.tx.enabled) return;
+  state.entries
+    .filter((e) => e.transcriptStatus === 'error' && (e.txAttempts || 0) < 5)
+    .reverse()
+    .forEach((e) => queueTranscription(e));
+}
+
 async function runQueue() {
   if (state.txBusy) return;
   state.txBusy = true;
@@ -721,16 +752,20 @@ async function runQueue() {
         entry.transcriptStatus = 'working';
         onTranscriptChange(entry);
         try {
-          const { text, words } = await transcribe(state.tx.model, entry.audio);
+          const { text, words, segments } = await transcribeWithFallback(entry.audio);
           entry.transcript = applyWordFixes(text);
-          entry.words = words.length ? fixWords(words) : null;
-          entry.segments = null;
+          entry.words = words?.length ? fixWords(words) : null;
+          entry.segments = segments?.length ? segments.map((x) => ({ ...x, t: applyWordFixes(x.t) })) : null;
           entry.transcriptStatus = 'done';
           delete entry.transcriptError;
+          delete entry.txAttempts;
         } catch (err) {
           console.warn('Transcription failed', err);
           entry.transcriptStatus = 'error';
-          entry.transcriptError = navigator.onLine ? (err.message || String(err)) : 'offline and the model is not downloaded yet';
+          entry.txAttempts = (entry.txAttempts || 0) + 1;
+          entry.transcriptError = navigator.onLine
+            ? (err.message || String(err))
+            : 'no transcription model is saved on this phone yet. It will try again when you are online.';
         }
         if (state.entries.includes(entry)) await db.putEntry(entry);
         onTranscriptChange(entry, true);
@@ -839,7 +874,10 @@ async function enableTranscription() {
       $('#tx-status').textContent = `Downloading ${MODELS[model].label} model… ${Math.round(fraction * 100)}%`;
     });
     state.tx = { ...state.tx, enabled: true, model };
+    state.txReady = true;
+    state.txNeedsUpdate = false;
     await saveTxSettings();
+    retryFailedTranscriptions();
     requestPersistence();
     toast('Transcription is on and works offline.');
   } catch (err) {
@@ -857,7 +895,7 @@ async function updateModelInBackground() {
     window.addEventListener('online', updateModelInBackground, { once: true });
     return;
   }
-  const model = state.tx.model;
+  const model = currentModelFor(state.tx.model);
   state.txDownload = 0;
   state.txUpdating = true;
   renderTxSettings();
@@ -871,7 +909,10 @@ async function updateModelInBackground() {
       }
     });
     state.txNeedsUpdate = false;
+    state.tx = { ...state.tx, model };
+    await saveTxSettings();
     toast('Transcription updated: new notes now highlight word by word.');
+    retryFailedTranscriptions();
   } catch (err) {
     console.warn('Model update failed', err);
   } finally {
@@ -913,7 +954,7 @@ function renderTxSettings() {
   if (!sel.options.length) {
     sel.innerHTML = Object.entries(MODELS)
       .map(([id, m]) => `<option value="${id}">${m.label} (${m.size}): ${m.note}</option>`).join('');
-    sel.value = state.tx.model;
+    sel.value = currentModelFor(state.tx.model);
   }
   const downloading = state.txDownload !== null;
   const chosen = sel.value;
@@ -926,12 +967,17 @@ function renderTxSettings() {
       ? `Updating to word-by-word timing… ${Math.round(state.txDownload * 100)}%`
       : `Downloading ${MODELS[chosen].label} model… ${Math.round(state.txDownload * 100)}%`;
   } else if (state.tx.enabled) {
-    $('#tx-status').textContent = `On, using the ${MODELS[state.tx.model].label} model. Works offline.${queued ? ` Transcribing ${queued} note${queued === 1 ? '' : 's'}…` : ''}`;
+    const label = MODELS[currentModelFor(state.tx.model)].label;
+    const ready = state.txReady;
+    const offlineNote = ready === false
+      ? ' Not saved on this phone yet: connect to the internet once to download it.'
+      : LEGACY_MODELS[state.tx.model] ? ' Works offline. A word-by-word update downloads next time you are online.' : ' Saved on this phone, works offline.';
+    $('#tx-status').textContent = `On, using the ${label} model.${offlineNote}${queued ? ` Transcribing ${queued} note${queued === 1 ? '' : 's'}…` : ''}`;
   } else {
     $('#tx-status').textContent = 'Off. Turn it on to get a text version of each voice note.';
   }
 
-  const needsDownload = !state.tx.enabled || chosen !== state.tx.model;
+  const needsDownload = !state.tx.enabled || chosen !== currentModelFor(state.tx.model);
   const enableBtn = $('#tx-enable');
   enableBtn.hidden = !needsDownload;
   enableBtn.disabled = downloading;
@@ -1158,6 +1204,12 @@ async function refreshMics() {
 }
 
 async function renderSettings() {
+  if (state.tx.enabled) {
+    downloadedModels().then((list) => {
+      const ready = list.includes(state.tx.model) || list.includes(currentModelFor(state.tx.model));
+      if (ready !== state.txReady) { state.txReady = ready; renderTxSettings(); }
+    });
+  }
   refreshMics();
   $('#app-version').textContent = `Version ${APP_VERSION}`;
   renderTxSettings();
@@ -1254,7 +1306,7 @@ function bindEvents() {
   $('#entry-form').elements.transcript.addEventListener('input', () => { if (state.editing) state.editing.transcriptDirty = true; });
   $('#editor-transcribe').addEventListener('click', () => {
     const entry = state.entries.find((e) => e.id === state.editing?.id);
-    if (entry) queueTranscription(entry);
+    if (entry) { entry.txAttempts = 0; queueTranscription(entry); }
   });
 
   $('#tx-model').addEventListener('change', renderTxSettings);
@@ -1355,11 +1407,9 @@ async function init() {
     if (state.hasPin) lock();
     state.entries = await db.allEntries();
     state.tx = { ...state.tx, ...(await db.getMeta('transcription')) };
-    if (LEGACY_MODELS[state.tx.model] || !MODELS[state.tx.model]) {
-      state.tx.model = LEGACY_MODELS[state.tx.model] || DEFAULT_MODEL;
-      await db.setMeta('transcription', state.tx);
-      state.txNeedsUpdate = state.tx.enabled;
-    }
+    // An older model stays in use until its word-timing replacement has downloaded.
+    if (!MODELS[state.tx.model] && !LEGACY_MODELS[state.tx.model]) state.tx.model = DEFAULT_MODEL;
+    state.txNeedsUpdate = state.tx.enabled && !!LEGACY_MODELS[state.tx.model];
     state.micId = (await db.getMeta('micId')) || '';
     state.wordFixes = (await db.getMeta('wordFixes')) || [];
   } catch (err) {
@@ -1368,11 +1418,13 @@ async function init() {
   renderStreakBadge();
   renderRecent();
   if (state.txNeedsUpdate) updateModelInBackground();
+  window.addEventListener('online', retryFailedTranscriptions);
   if (state.tx.enabled) {
     state.entries
       .filter((e) => e.transcriptStatus === 'queued' || e.transcriptStatus === 'working')
       .reverse()
       .forEach((e) => queueTranscription(e));
+    retryFailedTranscriptions();
   }
 }
 

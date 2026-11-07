@@ -18,11 +18,33 @@ export const MODELS = {
 export const DEFAULT_MODEL = 'onnx-community/whisper-base.en_timestamped';
 
 // Models used by earlier versions of the app, mapped to their word-timing equivalents.
+// They still work (with sentence timing only), so a phone that has one can transcribe offline.
 export const LEGACY_MODELS = {
   'Xenova/whisper-tiny.en': 'onnx-community/whisper-tiny.en_timestamped',
   'Xenova/whisper-base.en': 'onnx-community/whisper-base.en_timestamped',
   'Xenova/whisper-small.en': 'onnx-community/whisper-small.en_timestamped',
 };
+
+const ALL_MODELS = [...Object.keys(MODELS), ...Object.keys(LEGACY_MODELS)];
+
+/** The current model a (possibly old) model id corresponds to. */
+export const currentModelFor = (id) => (MODELS[id] ? id : LEGACY_MODELS[id] || DEFAULT_MODEL);
+const dtypeFor = (id) => MODELS[currentModelFor(id)].dtype;
+const hasWordTiming = (id) => !!MODELS[id];
+
+/** Models whose files are already saved on this device (usable offline). */
+export async function downloadedModels() {
+  try {
+    if (!(await caches.has('transformers-cache'))) return [];
+    const urls = (await (await caches.open('transformers-cache')).keys()).map((r) => r.url);
+    return ALL_MODELS.filter((id) => {
+      const mine = urls.filter((u) => u.includes(`/${id}/resolve/`));
+      return mine.some((u) => u.includes('/encoder_model')) && mine.some((u) => u.includes('/decoder_model_merged'));
+    });
+  } catch {
+    return [];
+  }
+}
 
 let worker = null;
 let nextReq = 1;
@@ -63,7 +85,7 @@ function call(msg, transfer = [], onProgress) {
 /** Download (or load from cache) a model. onProgress(fraction 0..1). */
 export function loadModel(model, onProgress) {
   const files = new Map();
-  return call({ type: 'load', model, dtype: MODELS[model].dtype }, [], (p) => {
+  return call({ type: 'load', model, dtype: dtypeFor(model) }, [], (p) => {
     if (!p.total) return;
     files.set(p.file, p);
     let loaded = 0; let total = 0;
@@ -88,6 +110,7 @@ async function decodeTo16kMono(arrayBuffer) {
 
 export async function transcribe(model, audioArrayBuffer) {
   const audio = await decodeTo16kMono(audioArrayBuffer);
-  return call({ type: 'transcribe', model, dtype: MODELS[model].dtype, audio }, [audio.buffer]);
-  // resolves to { text, words: [{ w, s, e }] } (times in seconds)
+  const timestamps = hasWordTiming(model) ? 'word' : true;
+  return call({ type: 'transcribe', model, dtype: dtypeFor(model), timestamps, audio }, [audio.buffer]);
+  // resolves to { text, words: [{ w, s, e }] | null, segments: [{ t, s, e }] | null } (seconds)
 }
