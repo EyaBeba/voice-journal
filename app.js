@@ -2,7 +2,7 @@ import * as db from './db.js';
 import { newEncryptionRecord, unlockKey } from './crypt.js';
 import { createZip, readZip } from './zip.js';
 import { PROMPTS, PACKS } from './prompts.js';
-import { MODELS, DEFAULT_MODEL, LEGACY_MODELS, currentModelFor, downloadedModels, loadModel, transcribe } from './transcribe.js';
+import { MODELS, DEFAULT_MODEL, LEGACY_MODELS, IMPROVE_MODELS, currentModelFor, downloadedModels, gpuSupport, loadModel, transcribe } from './transcribe.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -16,7 +16,7 @@ const MOODS = [
 ];
 const moodOf = (v) => MOODS.find((m) => m.v === v);
 const AUTO_LOCK_MS = 60_000;
-const APP_VERSION = 12;
+const APP_VERSION = 13;
 const PLAY_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/></svg>';
 const PAUSE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.5"/><rect x="14" y="5" width="4" height="14" rx="1.5"/></svg>';
 const STAR_ICON = '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/></svg>';
@@ -36,6 +36,7 @@ const state = {
   txQueue: [], // entry ids waiting to be transcribed
   txBusy: false,
   txDownload: null, // 0..1 while a model is downloading
+  txOverride: new Map(), // entry id -> model id for "Improve" runs
   micId: '', // chosen microphone deviceId ('' = automatic)
   wordFixes: [], // [{ from, to }] applied to new transcripts
 };
@@ -962,6 +963,93 @@ function openEditor(entry, isNew) {
   $('#editor').showModal();
 }
 
+/* ---------- learn from your corrections ----------
+   When you fix words in a transcript, find what changed and offer to fix it automatically. */
+function wordDiff(before, after) {
+  const tok = (x) => x.split(/\s+/).filter(Boolean);
+  const norm = (w) => w.toLowerCase().replace(/^[^\p{L}\p{N}']+|[^\p{L}\p{N}']+$/gu, '');
+  const a = tok(before).slice(0, 800);
+  const b = tok(after).slice(0, 800);
+  const na = a.map(norm);
+  const nb = b.map(norm);
+  // longest common subsequence of words
+  const L = Array.from({ length: a.length + 1 }, () => new Uint16Array(b.length + 1));
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) L[i][j] = na[i] === nb[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  }
+  const pairs = [];
+  let i = 0; let j = 0; let del = []; let ins = [];
+  const flush = () => {
+    if (del.length && ins.length && del.length <= 3 && ins.length <= 3) {
+      const from = del.map(norm).join(' ').trim();
+      const to = ins.map((w) => w.replace(/^[^\p{L}\p{N}']+|[^\p{L}\p{N}']+$/gu, '')).join(' ').trim();
+      const meaningful = (x) => x.split(' ').some((w) => w.length > 2 && !STOPWORDS.has(w.toLowerCase()));
+      const lowTo = to.toLowerCase();
+      // skip grammar edits like "want" -> "wanted" (same word, different ending)
+      const inflection = lowTo.startsWith(from) || from.startsWith(lowTo);
+      if (from && to && from !== lowTo && from.length > 2 && meaningful(from) && !inflection) pairs.push({ from, to });
+    }
+    del = []; ins = [];
+  };
+  while (i < a.length || j < b.length) {
+    if (i < a.length && j < b.length && na[i] === nb[j]) { flush(); i++; j++; }
+    else if (j < b.length && (i >= a.length || L[i][j + 1] >= L[i + 1][j])) ins.push(b[j++]);
+    else del.push(a[i++]);
+  }
+  flush();
+  return pairs;
+}
+
+async function offerCorrections(pairs) {
+  const known = new Set(state.wordFixes.map((f) => f.from.toLowerCase()));
+  const declined = new Set(state.fixesDeclined || []);
+  const fresh = pairs.filter((p) => !known.has(p.from) && !declined.has(`${p.from}→${p.to.toLowerCase()}`)).slice(0, 3);
+  for (const p of fresh) {
+    const answer = await askLearn(p);
+    if (answer === 'always') {
+      state.wordFixes = [...state.wordFixes.filter((f) => f.from.toLowerCase() !== p.from), { from: p.from, to: p.to }];
+      await db.setMeta('wordFixes', state.wordFixes);
+      const n = await fixExistingQuietly();
+      toast(`“${p.from}” will be written “${p.to}” from now on${n ? `, and was fixed in ${n} other note${n === 1 ? '' : 's'}` : ''}.`);
+    } else if (answer === 'never') {
+      state.fixesDeclined = [...(state.fixesDeclined || []), `${p.from}→${p.to.toLowerCase()}`];
+      await db.setMeta('fixesDeclined', state.fixesDeclined);
+    }
+  }
+}
+
+function askLearn({ from, to }) {
+  return new Promise((resolve) => {
+    const dlg = $('#learn-dialog');
+    $('#learn-from').textContent = from;
+    $('#learn-to').textContent = to;
+    const done = (answer) => { dlg.close(); resolve(answer); };
+    $('#learn-always').onclick = () => done('always');
+    $('#learn-skip').onclick = () => done('skip');
+    $('#learn-never').onclick = () => done('never');
+    dlg.oncancel = () => resolve('skip');
+    dlg.showModal();
+  });
+}
+
+async function fixExistingQuietly() {
+  let changed = 0;
+  for (const e of state.entries) {
+    if (!e.transcript) continue;
+    const fixed = applyWordFixes(e.transcript);
+    if (fixed !== e.transcript) {
+      e.transcript = fixed;
+      if (Array.isArray(e.words)) e.words = fixWords(e.words);
+      if (Array.isArray(e.segments)) e.segments = e.segments.map((seg) => ({ ...seg, t: applyWordFixes(seg.t) }));
+      e.summary = autoSummary(e.transcript);
+      await db.putEntry(e);
+      changed++;
+    }
+  }
+  rerenderActive();
+  return changed;
+}
+
 async function saveEditor(ev) {
   ev.preventDefault();
   const f = ev.target;
@@ -981,7 +1069,8 @@ async function saveEditor(ev) {
     if (player.id === entry.id) stopPlayer();
     if (state.editing.transcriptDirty) {
       const edited = f.elements.transcript.value.trim();
-      if (edited !== entry.transcript) { entry.segments = null; entry.words = null; }
+      if (entry.transcript && edited && edited !== entry.transcript) state.learnFrom = wordDiff(entry.transcript, edited);
+      if (edited !== entry.transcript) { entry.segments = null; entry.words = null; entry.transcriptEdited = true; }
       entry.transcript = edited;
       entry.summary = autoSummary(edited);
       if (entry.transcript) entry.transcriptStatus = 'done';
@@ -995,6 +1084,11 @@ async function saveEditor(ev) {
   }
   $('#editor').close();
   rerenderActive();
+  if (state.learnFrom?.length) {
+    const pairs = state.learnFrom;
+    state.learnFrom = null;
+    offerCorrections(pairs);
+  }
 }
 
 function renderEditorTranscript(entry) {
@@ -1011,6 +1105,45 @@ function renderEditorTranscript(entry) {
     : entry.transcriptStatus === 'error' ? `Transcription failed: ${entry.transcriptError || 'unknown error'}` : '';
   btn.hidden = busy;
   btn.textContent = entry.transcript ? 'Transcribe again' : 'Transcribe';
+  const improve = $('#editor-improve');
+  const m = improveModel();
+  improve.hidden = busy || !entry.transcript || entry.improvedWith === m.label;
+  improve.textContent = `Improve with ${m.label}`;
+  if (!busy && entry.improvedWith && !status.textContent) status.textContent = `Improved with ${entry.improvedWith}.`;
+  if (busy && state.txOverride.has(entry.id)) status.textContent = `Improving with ${m.label}… you can close this, it keeps going.`;
+}
+
+function improveModel() {
+  return IMPROVE_MODELS[state.tx.improveWith] || IMPROVE_MODELS.small;
+}
+
+/** Re-transcribe one note with a bigger, smarter model (downloaded once on first use). */
+async function improveEntry(entry) {
+  const m = improveModel();
+  if (entry.transcriptEdited && !confirm('You edited this transcript by hand. Replace it with a new one from the larger model?')) return;
+  const status = $('#editor-transcript-status');
+  if (!(await downloadedModels()).includes(m.id)) {
+    if (!navigator.onLine) { toast(`The ${m.label} model downloads once (${m.size}); connect to the internet first.`); return; }
+    if (!confirm(`Improving uses the ${m.label} model, a one-time download of ${m.size}. Download it now?`)) return;
+    $('#editor-improve').disabled = true;
+    try {
+      await loadModel(m.id, (f) => {
+        const text = `Downloading ${m.label} model… ${Math.round(f * 100)}%`;
+        if (state.editing?.id === entry.id) status.textContent = text;
+        else toast(text);
+      });
+    } catch (err) {
+      toast(m.device === 'webgpu'
+        ? `Turbo couldn't start on this phone's graphics chip (${err.message || err}). Try Small instead in Settings.`
+        : `Download failed: ${err.message || err}`);
+      return;
+    } finally {
+      $('#editor-improve').disabled = false;
+    }
+  }
+  state.txOverride.set(entry.id, m.id);
+  entry.txAttempts = 0;
+  queueTranscription(entry);
 }
 
 /* ---------- transcription ---------- */
@@ -1120,16 +1253,33 @@ async function runQueue() {
       if (entry) {
         entry.transcriptStatus = 'working';
         onTranscriptChange(entry);
+        const override = state.txOverride.get(entry.id);
+        const before = { transcript: entry.transcript, words: entry.words, segments: entry.segments, summary: entry.summary };
         try {
-          const { text, words, segments } = await transcribeWithFallback(entry.audio);
+          const { text, words, segments } = override ? await transcribe(override, entry.audio) : await transcribeWithFallback(entry.audio);
           entry.transcript = applyWordFixes(text);
           entry.words = words?.length ? fixWords(words) : null;
           entry.segments = segments?.length ? segments.map((x) => ({ ...x, t: applyWordFixes(x.t) })) : null;
           entry.transcriptStatus = 'done';
           delete entry.transcriptError;
           delete entry.txAttempts;
+          if (override) {
+            entry.improvedWith = Object.values(IMPROVE_MODELS).find((m) => m.id === override)?.label || 'a larger model';
+            entry.transcriptEdited = false;
+            toast(`Transcript improved with ${entry.improvedWith}.`);
+          }
           addAutoText(entry);
         } catch (err) {
+          if (override && before.transcript) {
+            // An improve run failed: keep the transcript the note already had.
+            Object.assign(entry, before, { transcriptStatus: 'done' });
+            toast(`Couldn't improve this note: ${err.message || err}`);
+            state.txOverride.delete(entry.id);
+            if (state.entries.includes(entry)) await db.putEntry(entry);
+            onTranscriptChange(entry, true);
+            state.txQueue.shift();
+            continue;
+          }
           console.warn('Transcription failed', err);
           entry.transcriptStatus = 'error';
           entry.txAttempts = (entry.txAttempts || 0) + 1;
@@ -1137,6 +1287,7 @@ async function runQueue() {
             ? (err.message || String(err))
             : 'no transcription model is saved on this phone yet. It will try again when you are online.';
         }
+        state.txOverride.delete(entry.id);
         if (state.entries.includes(entry)) await db.putEntry(entry);
         onTranscriptChange(entry, true);
       }
@@ -1402,6 +1553,9 @@ function renderTxSettings() {
   $('#tx-disable').hidden = !state.tx.enabled || downloading;
   $('#tx-auto-row').hidden = !state.tx.enabled;
   $('#tx-auto').checked = state.tx.auto;
+
+  $('#improve-row').hidden = !state.tx.enabled;
+  $('#improve-with').value = state.tx.improveWith === 'turbo' ? 'turbo' : 'small';
 
   const backlog = state.tx.enabled ? untranscribed().length : 0;
   const backlogBtn = $('#tx-backlog');
@@ -2048,6 +2202,24 @@ function bindEvents() {
   });
 
   $('#tx-model').addEventListener('change', renderTxSettings);
+  $('#improve-with').addEventListener('change', async (ev) => {
+    if (ev.target.value === 'turbo') {
+      const gpu = await gpuSupport();
+      $('#gpu-result').textContent = gpu.reason;
+      if (!gpu.ok) { ev.target.value = 'small'; toast('Turbo needs a supported graphics chip. Staying with Small.'); return; }
+    }
+    state.tx = { ...state.tx, improveWith: ev.target.value };
+    await saveTxSettings();
+  });
+  $('#gpu-test').addEventListener('click', async () => {
+    $('#gpu-result').textContent = 'Checking…';
+    const gpu = await gpuSupport();
+    $('#gpu-result').textContent = gpu.reason;
+  });
+  $('#editor-improve').addEventListener('click', () => {
+    const entry = state.entries.find((e) => e.id === state.editing?.id);
+    if (entry) improveEntry(entry);
+  });
   $('#fix-form').addEventListener('submit', onAddFix);
   $('#fix-apply').addEventListener('click', applyFixesToExisting);
   $('#fix-list').addEventListener('click', async (ev) => {
@@ -2215,6 +2387,7 @@ async function init() {
     state.customPrompts = (await db.getMeta('customPrompts')) || [];
     state.reminder = (await db.getMeta('reminder')) || { on: false, time: '20:00' };
     state.recapSeen = (await db.getMeta('recapSeen')) || null;
+    state.fixesDeclined = (await db.getMeta('fixesDeclined')) || [];
     renderPrompt();
   } catch (err) {
     toast(`Storage is unavailable: ${err.message || err}`);

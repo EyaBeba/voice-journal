@@ -622,3 +622,13 @@ input[type="time"] { color-scheme: inherit; }
   font-family: var(--serif); font-size: 1.6rem; color: var(--text);
 }
 .privacy-cover svg { width: 40px; height: 40px; color: var(--accent-text); stroke-width: 1.2; }
+
+/* Learn-a-fix dialog */
+.learn-dialog { width: min(380px, calc(100vw - 32px)); text-align: center; }
+.learn-dialog h2 { font-size: 1.7rem; margin-bottom: 14px; }
+.learn-pair { font-size: 1.1rem; margin: 0 0 10px; }
+.learn-pair .from { color: var(--muted); text-decoration: line-through; }
+.learn-pair .sep { color: var(--accent-text); margin: 0 10px; }
+.learn-pair .to { font-family: var(--serif); font-size: 1.5rem; }
+.learn-dialog .stack .btn { width: 100%; }
+.transcript-row .row { gap: 6px; flex-wrap: nowrap; }

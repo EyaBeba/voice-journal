@@ -12,14 +12,14 @@ let asr = null;
 let loadedModel = null;
 let loading = null;
 
-async function load(model, dtype) {
+async function load(model, dtype, device = 'wasm') {
   if (asr && loadedModel === model) return asr;
   if (loading?.model === model) return loading.promise;
   const promise = (async () => {
     if (asr) { await asr.dispose?.(); asr = null; loadedModel = null; }
     const p = await pipeline('automatic-speech-recognition', model, {
       dtype,
-      device: 'wasm',
+      device,
       progress_callback: (info) => {
         if (info.status === 'progress') {
           self.postMessage({ type: 'progress', file: info.file, loaded: info.loaded, total: info.total });
@@ -42,13 +42,15 @@ self.onmessage = async ({ data }) => {
   const { type, reqId } = data;
   try {
     if (type === 'load') {
-      await load(data.model, data.dtype);
+      await load(data.model, data.dtype, data.device);
       self.postMessage({ type: 'done', reqId, result: null });
     } else if (type === 'transcribe') {
-      const p = await load(data.model, data.dtype);
+      const p = await load(data.model, data.dtype, data.device);
       // 'word' needs a timestamped model; older models give sentence timing instead.
       const wordLevel = data.timestamps === 'word';
-      const out = await p(data.audio, { chunk_length_s: 30, stride_length_s: 5, return_timestamps: wordLevel ? 'word' : true });
+      const options = { chunk_length_s: 30, stride_length_s: 5, return_timestamps: wordLevel ? 'word' : true };
+      if (data.language) Object.assign(options, { language: data.language, task: 'transcribe' });
+      const out = await p(data.audio, options);
       const first = Array.isArray(out) ? out[0] : out;
       const text = (first?.text || '').trim();
       const pieces = (first?.chunks || [])

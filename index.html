@@ -149,6 +149,17 @@
           <button class="btn" type="button" id="tx-backlog" hidden>Transcribe older notes</button>
           <button class="btn" type="button" id="tx-disable" hidden>Turn off</button>
         </div>
+        <div id="improve-row" class="field" hidden>
+          <span>Improve button uses</span>
+          <select id="improve-with" aria-label="Model for improving transcripts">
+            <option value="small">Small (~250 MB): smarter, about 3× slower</option>
+            <option value="turbo">Turbo on graphics chip (~760 MB): smartest, experimental</option>
+          </select>
+          <div class="row" style="align-items:center; margin-top:10px">
+            <button id="gpu-test" class="btn small-btn" type="button">Test my phone for Turbo</button>
+          </div>
+          <p id="gpu-result" class="muted small" style="margin-top:8px"></p>
+        </div>
         <label id="tx-auto-row" class="check" hidden>
           <input id="tx-auto" type="checkbox">
           <span>Transcribe automatically after each recording</span>
@@ -272,7 +283,10 @@
       </label>
       <div class="transcript-row">
         <p id="editor-transcript-status" class="muted small" aria-live="polite"></p>
-        <button id="editor-transcribe" class="btn small-btn" type="button" hidden>Transcribe</button>
+        <div class="row">
+          <button id="editor-improve" class="btn small-btn" type="button" hidden>Improve</button>
+          <button id="editor-transcribe" class="btn small-btn" type="button" hidden>Transcribe</button>
+        </div>
       </div>
 
       <div class="field">
@@ -317,6 +331,17 @@
         <button class="btn primary" type="submit" value="save">Save</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="learn-dialog" class="learn-dialog">
+    <h2>Learn this fix?</h2>
+    <p class="learn-pair"><span id="learn-from" class="from"></span><span class="sep">&rarr;</span><span id="learn-to" class="to"></span></p>
+    <p class="muted">You corrected this word. Fix it automatically in future transcripts, and in your other notes?</p>
+    <div class="stack">
+      <button id="learn-always" class="btn primary" type="button">Always fix</button>
+      <button id="learn-skip" class="btn" type="button">Not this time</button>
+      <button id="learn-never" class="btn danger" type="button" style="padding-left:22px">Never ask for this</button>
+    </div>
   </dialog>
 
   <dialog id="photo-view" class="photo-view" aria-label="Photo"><img alt=""></dialog>

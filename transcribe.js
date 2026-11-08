@@ -17,6 +17,20 @@ export const MODELS = {
 };
 export const DEFAULT_MODEL = 'onnx-community/whisper-base.en_timestamped';
 
+// Bigger models used by the "Improve" button. Turbo is Whisper's best model; it is only
+// fast enough on a phone's graphics chip (WebGPU), so it runs there or not at all.
+export const IMPROVE_MODELS = {
+  small: {
+    id: 'onnx-community/whisper-small.en_timestamped', label: 'Small', size: '~250 MB',
+    dtype: { encoder_model: 'q8', decoder_model_merged: 'q8' }, device: 'wasm',
+  },
+  turbo: {
+    id: 'onnx-community/whisper-large-v3-turbo_timestamped', label: 'Turbo', size: '~760 MB',
+    dtype: { encoder_model: 'q4', decoder_model_merged: 'q4' }, device: 'webgpu', multilingual: true,
+  },
+};
+const EXTRA = Object.fromEntries(Object.values(IMPROVE_MODELS).map((m) => [m.id, m]));
+
 // Models used by earlier versions of the app, mapped to their word-timing equivalents.
 // They still work (with sentence timing only), so a phone that has one can transcribe offline.
 export const LEGACY_MODELS = {
@@ -25,12 +39,32 @@ export const LEGACY_MODELS = {
   'Xenova/whisper-small.en': 'onnx-community/whisper-small.en_timestamped',
 };
 
-const ALL_MODELS = [...Object.keys(MODELS), ...Object.keys(LEGACY_MODELS)];
+const ALL_MODELS = [...new Set([...Object.keys(MODELS), ...Object.keys(EXTRA), ...Object.keys(LEGACY_MODELS)])];
 
 /** The current model a (possibly old) model id corresponds to. */
 export const currentModelFor = (id) => (MODELS[id] ? id : LEGACY_MODELS[id] || DEFAULT_MODEL);
-const dtypeFor = (id) => MODELS[currentModelFor(id)].dtype;
-const hasWordTiming = (id) => !!MODELS[id];
+const infoFor = (id) => EXTRA[id] || MODELS[currentModelFor(id)];
+const dtypeFor = (id) => infoFor(id).dtype;
+const deviceFor = (id) => (EXTRA[id]?.device) || 'wasm';
+const hasWordTiming = (id) => !!MODELS[id] || !!EXTRA[id];
+
+/**
+ * Can this phone run models on its graphics chip (WebGPU)? Checks for a GPU adapter
+ * with enough memory for Turbo. The real test is the first Turbo transcription.
+ */
+export async function gpuSupport() {
+  if (!('gpu' in navigator)) return { ok: false, reason: 'This browser has no WebGPU (needs Chrome 121+ on Android 12+).' };
+  try {
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) return { ok: false, reason: 'WebGPU is present, but no usable graphics chip was found on this phone.' };
+    const maxBuffer = adapter.limits.maxBufferSize;
+    if (maxBuffer < 256 * 1024 * 1024) return { ok: false, reason: 'The graphics chip has too little memory for Turbo.' };
+    const info = adapter.info || {};
+    return { ok: true, reason: `Graphics chip found${info.vendor ? ` (${info.vendor})` : ''}. Turbo should run on it.` };
+  } catch (err) {
+    return { ok: false, reason: `WebGPU check failed: ${err.message || err}` };
+  }
+}
 
 /** Models whose files are already saved on this device (usable offline). */
 export async function downloadedModels() {
@@ -85,7 +119,7 @@ function call(msg, transfer = [], onProgress) {
 /** Download (or load from cache) a model. onProgress(fraction 0..1). */
 export function loadModel(model, onProgress) {
   const files = new Map();
-  return call({ type: 'load', model, dtype: dtypeFor(model) }, [], (p) => {
+  return call({ type: 'load', model, dtype: dtypeFor(model), device: deviceFor(model) }, [], (p) => {
     if (!p.total) return;
     files.set(p.file, p);
     let loaded = 0; let total = 0;
@@ -111,6 +145,7 @@ async function decodeTo16kMono(arrayBuffer) {
 export async function transcribe(model, audioArrayBuffer) {
   const audio = await decodeTo16kMono(audioArrayBuffer);
   const timestamps = hasWordTiming(model) ? 'word' : true;
-  return call({ type: 'transcribe', model, dtype: dtypeFor(model), timestamps, audio }, [audio.buffer]);
+  const language = EXTRA[model]?.multilingual ? 'english' : undefined;
+  return call({ type: 'transcribe', model, dtype: dtypeFor(model), device: deviceFor(model), language, timestamps, audio }, [audio.buffer]);
   // resolves to { text, words: [{ w, s, e }] | null, segments: [{ t, s, e }] | null } (seconds)
 }
