@@ -614,3 +614,11 @@ dialog audio { width: 100%; margin: 14px 0 4px; height: 40px; }
 }
 .custom-prompt-form input:focus { outline: none; border-color: var(--accent); }
 input[type="time"] { color-scheme: inherit; }
+
+/* Privacy cover for the app switcher */
+.privacy-cover {
+  position: fixed; inset: 0; z-index: 100; background: var(--bg);
+  display: grid; place-content: center; justify-items: center; gap: 14px;
+  font-family: var(--serif); font-size: 1.6rem; color: var(--text);
+}
+.privacy-cover svg { width: 40px; height: 40px; color: var(--accent-text); stroke-width: 1.2; }

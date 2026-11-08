@@ -181,9 +181,12 @@
             <button class="btn primary" type="submit" id="pin-save">Set PIN</button>
             <button class="btn" type="button" id="pin-remove" hidden>Remove PIN</button>
             <button class="btn" type="button" id="lock-now" hidden>Lock now</button>
+            <button class="btn" type="button" id="encrypt-on" hidden>Encrypt my notes</button>
+            <button class="btn" type="button" id="encrypt-off" hidden>Turn off encryption</button>
           </div>
         </form>
-        <p class="muted small">The PIN keeps people who pick up your device out of the app. It does not encrypt files.</p>
+        <p id="pin-note" class="muted small"></p>
+        <label class="check"><input id="privacy-on" type="checkbox" checked><span>Hide the journal in the app switcher</span></label>
       </div>
 
       <div class="card">
@@ -317,6 +320,11 @@
   </dialog>
 
   <dialog id="photo-view" class="photo-view" aria-label="Photo"><img alt=""></dialog>
+
+  <div id="privacy-cover" class="privacy-cover" hidden>
+    <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5M8 22h8"/></svg>
+    <span>Voice Journal</span>
+  </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 </body>

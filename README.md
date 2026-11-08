@@ -12,6 +12,15 @@ A private voice journal that works offline. It installs like an app on your phon
 - **Automatic titles and summaries.** Each transcribed note gets a title from what you said first, and longer notes a one-line summary (worked out on the phone, no online service).
 - **Crash-safe recording.** Audio is saved every second while you record, so a crash, call or dead battery doesn't lose the note; the screen stays awake while recording.
 - **Backup reminders.** A reminder appears when notes aren't backed up; on Android you can save the backup straight to Google Drive from the share sheet.
+- **Pause, trim, speed.** Pause mid-recording, trim silence or mistakes (non-destructive), and play back at up to 2×.
+- **Favorites and photos.** Star notes and filter to them; attach photos to an entry.
+- **Insights.** Weekly recap, mood patterns (by weekday, time of day and tag), a themes cloud of the words you use most, and "On this day" notes from a week, month or year ago.
+- **Prompt packs.** Reflection, Gratitude, Work, Relationships and Body & mind, plus your own prompts.
+- **Daily reminder.** A notification around your chosen time on days you haven't recorded (installed app, Android; the browser picks the exact moment).
+- **Quick capture.** Long-press the app icon and choose "Record now".
+- **Encryption.** Optionally encrypt notes, recordings and photos with your PIN (AES-256, key derived with PBKDF2). Forgetting the PIN means losing the notes, so keep backups; backups are not encrypted.
+- **Privacy screen.** The journal is covered in the app switcher.
+- **Text export.** All notes as one readable Markdown file.
 - **Streaks and a calendar heatmap.** Tap a day to see its entries. A chart shows your moods over the last 30 days.
 - **PIN lock.** The app locks when you open it and after 1 minute in the background.
 - **Zip backup and restore.** A backup holds every recording plus `journal.json`. Importing skips entries you already have.
@@ -35,6 +44,7 @@ The microphone, service worker and PIN lock need a secure context: `localhost` o
 | `index.html` / `styles.css` | UI (light and dark themes, mobile-first) |
 | `app.js` | Recording, playback, journal, calendar, PIN, backup |
 | `db.js` | IndexedDB storage |
+| `crypt.js` | Optional PIN-based encryption of entries |
 | `zip.js` | Dependency-free zip writer and reader for backups |
 | `prompts.js` | Daily journaling prompts |
 | `transcribe.js` / `transcriber.worker.js` | Offline speech-to-text (runs in a background thread) |
@@ -46,7 +56,7 @@ The microphone, service worker and PIN lock need a secure context: `localhost` o
 
 - Transcription models come from Hugging Face (`Xenova/whisper-*.en`) and are stored in the browser's Cache Storage. **Delete downloaded models** in Settings frees that space.
 
-- The PIN keeps people who pick up your device out of the app. It does **not** encrypt the stored audio.
+- Without encryption turned on, the PIN only locks the app screen. With encryption on, a 4-digit PIN can still be guessed by someone who copies the phone's browser data and has time and a computer, so a longer PIN is safer.
 - Browsers can clear site data when storage runs low. Use **Keep my data safe** in Settings, install the app, and export backups now and then.
 - If you update the app files, bump `CACHE` in `sw.js` so installed copies pick up the new version.
 

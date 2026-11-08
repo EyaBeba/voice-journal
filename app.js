@@ -1,4 +1,5 @@
 import * as db from './db.js';
+import { newEncryptionRecord, unlockKey } from './crypt.js';
 import { createZip, readZip } from './zip.js';
 import { PROMPTS, PACKS } from './prompts.js';
 import { MODELS, DEFAULT_MODEL, LEGACY_MODELS, currentModelFor, downloadedModels, loadModel, transcribe } from './transcribe.js';
@@ -15,7 +16,7 @@ const MOODS = [
 ];
 const moodOf = (v) => MOODS.find((m) => m.v === v);
 const AUTO_LOCK_MS = 60_000;
-const APP_VERSION = 11;
+const APP_VERSION = 12;
 const PLAY_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/></svg>';
 const PAUSE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.5"/><rect x="14" y="5" width="4" height="14" rx="1.5"/></svg>';
 const STAR_ICON = '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/></svg>';
@@ -1604,7 +1605,19 @@ function lock() {
 
 async function onUnlock(ev) {
   ev.preventDefault();
-  if (await checkPin($('#lock-pin').value)) {
+  const pin = $('#lock-pin').value;
+  if (await checkPin(pin)) {
+    if (state.encryption && !state.loaded) {
+      const btn = $('#lock-form .btn');
+      btn.disabled = true;
+      btn.textContent = 'Unlocking…';
+      const key = await unlockKey(pin, state.encryption);
+      btn.disabled = false;
+      btn.textContent = 'Unlock';
+      if (!key) { $('#lock-error').textContent = 'This PIN can’t open the encrypted journal.'; return; }
+      db.setKey(key);
+      await loadJournal();
+    }
     $('#lock').hidden = true;
     if (state.pendingRecord) { state.pendingRecord = false; startRecording(); }
     return;
@@ -1615,6 +1628,43 @@ async function onUnlock(ev) {
   card.classList.remove('shake');
   void card.offsetWidth;
   card.classList.add('shake');
+}
+
+/** Re-save every note (sealed or plain, depending on the current key). */
+async function rewriteAllEntries(label) {
+  let n = 0;
+  for (const e of state.entries) {
+    await db.putEntry(e);
+    n++;
+    if (n % 5 === 0) $('#pin-status').textContent = `${label} ${n} of ${state.entries.length}…`;
+  }
+  // audio saved during a recording in progress is left as is; it's deleted once the note is saved
+}
+
+async function enableEncryption() {
+  const err = $('#pin-error');
+  const pin = $('#pin-current').value;
+  if (!(await checkPin(pin))) { err.textContent = 'Enter your current PIN to turn on encryption.'; return; }
+  if (!confirm('Encrypt your journal with your PIN?\n\nIf you forget the PIN, your notes cannot be recovered by anyone. Keep a backup somewhere safe.')) return;
+  const { key, record } = await newEncryptionRecord(pin);
+  db.setKey(key);
+  await rewriteAllEntries('Encrypting');
+  await db.setMeta('encryption', record);
+  state.encryption = record;
+  $('#pin-form').reset();
+  err.textContent = '';
+  toast('Your journal is now encrypted with your PIN.');
+  renderSettings();
+}
+
+async function disableEncryption(pin, quiet = false) {
+  if (!(await checkPin(pin))) { $('#pin-error').textContent = 'Enter your current PIN to turn off encryption.'; return false; }
+  db.setKey(null);
+  await rewriteAllEntries('Decrypting');
+  await db.deleteMeta('encryption');
+  state.encryption = null;
+  if (!quiet) { $('#pin-form').reset(); toast('Encryption turned off.'); renderSettings(); }
+  return true;
 }
 
 async function onPinSave(ev) {
@@ -1629,6 +1679,14 @@ async function onPinSave(ev) {
   if (!/^\d{4,8}$/.test(next)) { err.textContent = 'Use 4 to 8 digits.'; return; }
   if (next !== confirmPin) { err.textContent = "The new PINs don't match."; return; }
   const salt = uid();
+  if (state.encryption) {
+    // New PIN, new key: re-encrypt everything with it before switching.
+    const { key, record } = await newEncryptionRecord(next);
+    db.setKey(key);
+    await rewriteAllEntries('Re-encrypting');
+    await db.setMeta('encryption', record);
+    state.encryption = record;
+  }
   await db.setMeta('pin', { salt, hash: await hashPin(next, salt) });
   state.hasPin = true;
   $('#pin-form').reset();
@@ -1639,6 +1697,7 @@ async function onPinSave(ev) {
 async function onPinRemove() {
   const err = $('#pin-error');
   if (!(await checkPin($('#pin-current').value))) { err.textContent = 'Enter your current PIN to remove it.'; return; }
+  if (state.encryption && !(await disableEncryption($('#pin-current').value, true))) return;
   await db.deleteMeta('pin');
   state.hasPin = false;
   $('#pin-form').reset();
@@ -1850,6 +1909,15 @@ async function renderSettings() {
   $('#pin-remove').hidden = !state.hasPin;
   $('#lock-now').hidden = !state.hasPin;
   $('#pin-save').textContent = state.hasPin ? 'Change PIN' : 'Set PIN';
+  $('#encrypt-on').hidden = !state.hasPin || !!state.encryption;
+  $('#encrypt-off').hidden = !state.encryption;
+  $('#pin-note').textContent = state.encryption
+    ? 'Your notes, recordings and photos are encrypted with your PIN. Forgetting the PIN means losing them, so keep a backup. Backups themselves are not encrypted.'
+    : state.hasPin
+      ? 'The PIN keeps people out of the app. Turn on encryption to also protect the stored notes themselves.'
+      : 'Set a PIN to lock the app, then you can encrypt your notes with it.';
+  if (state.encryption) $('#pin-status').textContent = 'PIN set · notes encrypted.';
+  try { $('#privacy-on').checked = localStorage.getItem('vj-privacy') !== '0'; } catch { /* default on */ }
 
   const last = state.lastExport;
   const pending = notBackedUp();
@@ -1881,6 +1949,16 @@ function renderGreeting() {
   const weekday = now.toLocaleDateString(undefined, { weekday: 'long' });
   const date = now.toLocaleDateString(undefined, { month: 'long', day: 'numeric' });
   $('#today-label').textContent = `${weekday} · ${date}`;
+}
+
+/* ---------- privacy screen ----------
+   Cover the journal when the app goes to the background, so the app switcher
+   preview shows a plain screen instead of your notes. */
+function privacyOn() {
+  try { return localStorage.getItem('vj-privacy') !== '0'; } catch { return true; }
+}
+function coverScreen(show) {
+  $('#privacy-cover').hidden = !(show && privacyOn());
 }
 
 /* ---------- theme ---------- */
@@ -2000,6 +2078,11 @@ function bindEvents() {
   $('#pin-form').addEventListener('submit', onPinSave);
   $('#pin-remove').addEventListener('click', onPinRemove);
   $('#lock-now').addEventListener('click', lock);
+  $('#encrypt-on').addEventListener('click', enableEncryption);
+  $('#encrypt-off').addEventListener('click', () => disableEncryption($('#pin-current').value));
+  $('#privacy-on').addEventListener('change', (ev) => {
+    try { localStorage.setItem('vj-privacy', ev.target.checked ? '1' : '0'); } catch { /* fine */ }
+  });
 
   $('#export-btn').addEventListener('click', exportZip);
   $('#export-text').addEventListener('click', exportText);
@@ -2078,7 +2161,12 @@ function bindEvents() {
   window.addEventListener('offline', syncOnline);
   syncOnline();
 
+  window.addEventListener('blur', () => coverScreen(true));
+  window.addEventListener('focus', () => coverScreen(false));
+  window.addEventListener('pagehide', () => coverScreen(true));
+  window.addEventListener('pageshow', () => coverScreen(false));
   document.addEventListener('visibilitychange', () => {
+    coverScreen(document.hidden);
     if (!document.hidden) renderGreeting();
     if (!document.hidden && rec.mr) keepScreenOn(true); // the lock is dropped when the app is hidden
     if (document.hidden) state.hiddenAt = Date.now();
@@ -2113,8 +2201,8 @@ async function init() {
   drawIdleWave();
   try {
     state.hasPin = !!(await db.getMeta('pin'));
+    state.encryption = (await db.getMeta('encryption')) || null;
     if (state.hasPin) lock();
-    state.entries = await db.allEntries();
     state.tx = { ...state.tx, ...(await db.getMeta('transcription')) };
     // An older model stays in use until its word-timing replacement has downloaded.
     if (!MODELS[state.tx.model] && !LEGACY_MODELS[state.tx.model]) state.tx.model = DEFAULT_MODEL;
@@ -2128,27 +2216,40 @@ async function init() {
     state.reminder = (await db.getMeta('reminder')) || { on: false, time: '20:00' };
     state.recapSeen = (await db.getMeta('recapSeen')) || null;
     renderPrompt();
+  } catch (err) {
+    toast(`Storage is unavailable: ${err.message || err}`);
+  }
+  // Opened from the "Record now" home-screen shortcut: start recording straight away.
+  const params = new URLSearchParams(location.search);
+  if (params.get('action') === 'record') {
+    history.replaceState(null, '', location.pathname);
+    if (state.hasPin) state.pendingRecord = true;
+  }
+  if (state.txNeedsUpdate) updateModelInBackground();
+  window.addEventListener('online', retryFailedTranscriptions);
+  // An encrypted journal can only be read once the PIN has unlocked the key.
+  if (!state.encryption) await loadJournal();
+  if (params.get('action') === 'record' && !state.hasPin) startRecording();
+}
+
+/** Read the notes and bring the screens up to date. */
+async function loadJournal() {
+  try {
+    state.entries = await db.allEntries();
     await recoverDraft();
     // Give older transcribed notes a title and summary once.
     for (const e of state.entries) {
       if (e.transcript && !e.title && e.summary === undefined) { addAutoText(e); await db.putEntry(e); }
     }
   } catch (err) {
-    toast(`Storage is unavailable: ${err.message || err}`);
+    toast(`Couldn't read your notes: ${err.message || err}`);
   }
+  state.loaded = true;
   renderStreakBadge();
   renderRecent();
   renderBackupBanner();
   renderRecapBanner();
-  // Opened from the "Record now" home-screen shortcut: start recording straight away.
-  const params = new URLSearchParams(location.search);
-  if (params.get('action') === 'record') {
-    history.replaceState(null, '', location.pathname);
-    if (state.hasPin) state.pendingRecord = true;
-    else startRecording();
-  }
-  if (state.txNeedsUpdate) updateModelInBackground();
-  window.addEventListener('online', retryFailedTranscriptions);
+  rerenderActive();
   if (state.tx.enabled) {
     state.entries
       .filter((e) => e.transcriptStatus === 'queued' || e.transcriptStatus === 'working')

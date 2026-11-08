@@ -1,4 +1,9 @@
 // Tiny IndexedDB wrapper. Everything lives on this device.
+import { sealEntry, openEntry, encryptBytes, decryptBytes } from './crypt.js';
+
+// When encryption is on, this holds the key (only while unlocked) and entries are sealed.
+let key = null;
+export const setKey = (k) => { key = k; };
 const DB_NAME = 'voice-journal';
 const DB_VERSION = 2;
 let dbPromise;
@@ -34,8 +39,13 @@ function run(storeName, mode, fn) {
 
 // Entries: { id, createdAt, durationMs, mime, title, mood, tags[], prompt, audio: ArrayBuffer }
 export const allEntries = () =>
-  run('entries', 'readonly', (s) => s.getAll()).then((list) => list.sort((a, b) => b.createdAt - a.createdAt));
-export const putEntry = (entry) => run('entries', 'readwrite', (s) => s.put(entry));
+  run('entries', 'readonly', (s) => s.getAll())
+    .then((list) => Promise.all(list.map((e) => (e.sealed ? openEntry(key, e) : e))))
+    .then((list) => list.sort((a, b) => b.createdAt - a.createdAt));
+export const putEntry = async (entry) => {
+  const stored = key ? await sealEntry(key, entry) : entry;
+  return run('entries', 'readwrite', (s) => s.put(stored));
+};
 export const deleteEntry = (id) => run('entries', 'readwrite', (s) => s.delete(id));
 
 export const getMeta = (key) => run('meta', 'readonly', (s) => s.get(key));
@@ -43,9 +53,12 @@ export const setMeta = (key, value) => run('meta', 'readwrite', (s) => s.put(val
 export const deleteMeta = (key) => run('meta', 'readwrite', (s) => s.delete(key));
 
 // Recording drafts: { draft, seq, data: ArrayBuffer }
-export const putChunk = (draft, seq, data) => run('chunks', 'readwrite', (s) => s.put({ draft, seq, data }));
+export const putChunk = async (draft, seq, data) => {
+  const stored = key ? { draft, seq, sealed: await encryptBytes(key, data) } : { draft, seq, data };
+  return run('chunks', 'readwrite', (s) => s.put(stored));
+};
 export const getChunks = (draft) =>
   run('chunks', 'readonly', (s) => s.getAll(IDBKeyRange.bound([draft, 0], [draft, Infinity])))
-    .then((list) => list.sort((a, b) => a.seq - b.seq).map((c) => c.data));
+    .then((list) => Promise.all(list.sort((a, b) => a.seq - b.seq).map((c) => (c.sealed ? decryptBytes(key, c.sealed) : c.data))));
 export const deleteChunks = (draft) =>
   run('chunks', 'readwrite', (s) => s.delete(IDBKeyRange.bound([draft, 0], [draft, Infinity])));
