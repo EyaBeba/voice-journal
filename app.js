@@ -1,6 +1,6 @@
 import * as db from './db.js';
 import { createZip, readZip } from './zip.js';
-import { PROMPTS } from './prompts.js';
+import { PROMPTS, PACKS } from './prompts.js';
 import { MODELS, DEFAULT_MODEL, LEGACY_MODELS, currentModelFor, downloadedModels, loadModel, transcribe } from './transcribe.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -15,7 +15,7 @@ const MOODS = [
 ];
 const moodOf = (v) => MOODS.find((m) => m.v === v);
 const AUTO_LOCK_MS = 60_000;
-const APP_VERSION = 10;
+const APP_VERSION = 11;
 const PLAY_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/></svg>';
 const PAUSE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.5"/><rect x="14" y="5" width="4" height="14" rx="1.5"/></svg>';
 const STAR_ICON = '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/></svg>';
@@ -146,6 +146,7 @@ function showView(name) {
 function rerenderActive() {
   renderStreakBadge();
   renderBackupBanner();
+  renderRecapBanner();
   const active = $('.view.active')?.id.replace('view-', '');
   if (active === 'record') renderRecent();
   if (active === 'journal') renderJournal();
@@ -154,10 +155,35 @@ function rerenderActive() {
 }
 
 /* ---------- prompts ---------- */
+function promptPool() {
+  const packs = state.promptPacks || Object.keys(PACKS);
+  const pool = [...packs.flatMap((k) => PACKS[k]?.prompts || []), ...(state.customPrompts || [])];
+  return pool.length ? pool : PROMPTS;
+}
+
 function todaysPrompt() {
   const now = new Date();
   const dayOfYear = Math.floor((now - new Date(now.getFullYear(), 0, 0)) / 86_400_000);
-  return PROMPTS[(dayOfYear + state.promptShift) % PROMPTS.length];
+  const pool = promptPool();
+  // Spread through the pool so neighbouring days don't pull from the same pack.
+  return pool[((dayOfYear * 7) + state.promptShift) % pool.length];
+}
+
+function renderPromptSettings() {
+  const packs = state.promptPacks || Object.keys(PACKS);
+  $('#prompt-packs').innerHTML = Object.entries(PACKS).map(([key, pack]) => `
+    <label class="check pack"><input type="checkbox" data-pack="${key}" ${packs.includes(key) ? 'checked' : ''}>
+      <span>${esc(pack.label)} <small class="muted">${pack.prompts.length}</small></span></label>`).join('');
+  $('#custom-prompt-list').innerHTML = (state.customPrompts || []).map((text, i) => `
+    <li><span>${esc(text)}</span><button class="icon-btn" type="button" data-remove-prompt="${i}" aria-label="Remove prompt">&times;</button></li>`).join('');
+}
+
+async function savePromptSettings() {
+  await db.setMeta('promptPacks', state.promptPacks);
+  await db.setMeta('customPrompts', state.customPrompts);
+  state.promptShift = 0;
+  renderPrompt();
+  renderPromptSettings();
 }
 const renderPrompt = () => { $('#prompt-text').textContent = todaysPrompt(); };
 
@@ -703,7 +729,31 @@ function renderList(container, entries, emptyHtml) {
   syncPlayerUI();
 }
 
+/** "On this day": a note from a week, a month or a year ago today. */
+function renderOnThisDay() {
+  const box = $('#on-this-day');
+  const now = new Date();
+  const back = [
+    ['One year ago today', new Date(now.getFullYear() - 1, now.getMonth(), now.getDate())],
+    ['One month ago today', new Date(now.getFullYear(), now.getMonth() - 1, now.getDate())],
+    ['One week ago today', new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7)],
+  ];
+  for (const [label, date] of back) {
+    const key = dayKey(date);
+    const e = state.entries.find((x) => dayKey(x.createdAt) === key);
+    if (e) {
+      box.innerHTML = `<div class="otd"><span class="eyebrow">${label}</span>${entryCard(e)}</div>`;
+      box.hidden = false;
+      syncPlayerUI();
+      return;
+    }
+  }
+  box.hidden = true;
+  box.innerHTML = '';
+}
+
 function renderRecent() {
+  renderOnThisDay();
   const today = dayKey(Date.now());
   const list = state.entries.filter((e) => dayKey(e.createdAt) === today);
   renderList($('#recent'), list, '');
@@ -1009,7 +1059,8 @@ function retryFailedTranscriptions() {
 const STOPWORDS = new Set(('a an and are as at be been but by did do does for from had has have he her his i if in into is it '
   + 'its just me my myself of on or our so some than that the their them then there these they this to too um uh us very '
   + 'was we were what when which who will with would you your really like also about am can could get got going go want '
-  + 'today yeah okay ok well because more much one out up all how know think thing things lot').split(' '));
+  + 'today yeah okay ok well because more much one out up all how know think thing things lot '
+  + 'went again long felt feel feeling made make day days time back still even said going being doing done need maybe').split(' '));
 const FILLER_START = /^(?:(?:so|um+|uh+|well|okay|ok|like|yeah|right|and|hmm+|alright|hi|hello)[,.!]?\s+)+/i;
 
 function sentencesOf(text) {
@@ -1242,6 +1293,51 @@ async function updateModelInBackground() {
   }
 }
 
+/* ---------- daily reminder ----------
+   Uses Periodic Background Sync (installed app, Chrome on Android). The browser decides the
+   exact moment, so the reminder arrives around your chosen time rather than on the minute. */
+async function reminderSupport() {
+  if (!('Notification' in window) || !('serviceWorker' in navigator)) return 'none';
+  const reg = await navigator.serviceWorker.ready;
+  return 'periodicSync' in reg ? 'periodic' : 'none';
+}
+
+async function renderReminder() {
+  const r = state.reminder;
+  $('#reminder-on').checked = !!r.on;
+  $('#reminder-time').value = r.time || '20:00';
+  $('#reminder-time-row').hidden = !r.on;
+  const support = await reminderSupport();
+  let note = '';
+  if (support === 'none') note = 'This browser can’t send reminders while the app is closed. Set a daily alarm in your Clock app instead.';
+  else if (r.on && Notification.permission === 'denied') note = 'Notifications are blocked for this app. Allow them in your phone’s app settings.';
+  else if (r.on) note = 'You’ll get a nudge around this time on days you haven’t recorded yet. Android decides the exact moment, and it needs the app to be installed.';
+  $('#reminder-note').textContent = note;
+}
+
+async function setReminder(on) {
+  const reg = await navigator.serviceWorker?.ready;
+  if (on) {
+    if (!('Notification' in window)) { toast('Notifications aren’t supported here.'); on = false; }
+    else if ((await Notification.requestPermission()) !== 'granted') { toast('Notifications were not allowed.'); on = false; }
+  }
+  state.reminder = { ...state.reminder, on, time: $('#reminder-time').value || '20:00' };
+  await db.setMeta('reminder', state.reminder);
+  try {
+    if (on && reg?.periodicSync) {
+      const perm = await navigator.permissions.query({ name: 'periodic-background-sync' }).catch(() => null);
+      if (perm && perm.state !== 'granted') toast('Install the app (Add to Home screen) so reminders can run in the background.');
+      await reg.periodicSync.register('daily-reminder', { minInterval: 6 * 60 * 60 * 1000 });
+    } else if (!on && reg?.periodicSync) {
+      await reg.periodicSync.unregister('daily-reminder');
+    }
+  } catch (err) {
+    console.warn('Reminder registration failed', err);
+    if (on) toast('Couldn’t schedule background reminders on this device.');
+  }
+  renderReminder();
+}
+
 async function disableTranscription() {
   state.tx = { ...state.tx, enabled: false };
   state.txQueue = [];
@@ -1325,7 +1421,112 @@ async function discardEditor() {
 }
 
 /* ---------- calendar ---------- */
+const weekStart = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return x; };
+const avg = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
+const moodFace = (v) => (v == null ? '–' : moodOf(Math.round(v)).e);
+
+/** Most-used meaningful words in transcripts (and titles) of the given notes. */
+function topWords(entries, n = 18) {
+  const freq = new Map();
+  for (const e of entries) {
+    const text = `${e.transcript || ''} ${e.title || ''}`.toLowerCase();
+    for (const w of text.match(/[\p{L}']+/gu) || []) {
+      const word = w.replace(/^'+|'+$/g, '');
+      if (word.length > 3 && !STOPWORDS.has(word)) freq.set(word, (freq.get(word) || 0) + 1);
+    }
+  }
+  return [...freq.entries()].filter(([, c]) => c > 1 || entries.length < 4).sort((a, b) => b[1] - a[1]).slice(0, n);
+}
+
+function weekSummary(from, to) {
+  const list = state.entries.filter((e) => e.createdAt >= from && e.createdAt < to);
+  const moods = list.filter((e) => e.mood).map((e) => e.mood);
+  const tags = new Map();
+  for (const e of list) for (const t of e.tags) tags.set(t, (tags.get(t) || 0) + 1);
+  const longest = list.reduce((m, e) => (!m || e.durationMs > m.durationMs ? e : m), null);
+  return {
+    list, days: new Set(list.map((e) => dayKey(e.createdAt))).size,
+    time: list.reduce((n, e) => n + e.durationMs, 0), mood: avg(moods),
+    tags: [...tags.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([t]) => t),
+    words: topWords(list, 5).map(([w]) => w), longest,
+  };
+}
+
+function renderRecap() {
+  const thisWeek = weekStart(new Date());
+  const lastWeek = new Date(thisWeek); lastWeek.setDate(lastWeek.getDate() - 7);
+  const cols = [['This week', weekSummary(+thisWeek, Date.now() + 1)], ['Last week', weekSummary(+lastWeek, +thisWeek)]];
+  $('#recap').innerHTML = cols.map(([label, w]) => `
+    <div class="recap-col">
+      <span class="eyebrow">${label}</span>
+      ${w.list.length ? `
+      <div class="recap-big">${w.list.length}<small> note${w.list.length === 1 ? '' : 's'}</small></div>
+      <ul class="recap-list">
+        <li><span>Days journaled</span><b>${w.days} / 7</b></li>
+        <li><span>Time recorded</span><b>${fmtTotal(w.time)}</b></li>
+        <li><span>Average mood</span><b>${moodFace(w.mood)}</b></li>
+        ${w.tags.length ? `<li><span>Top tags</span><b>${w.tags.map((t) => `#${esc(t)}`).join(' ')}</b></li>` : ''}
+        ${w.words.length ? `<li><span>You talked about</span><b>${w.words.map(esc).join(', ')}</b></li>` : ''}
+        ${w.longest ? `<li><span>Longest note</span><b>${esc(w.longest.title || 'Untitled')} · ${fmtDuration(w.longest.durationMs)}</b></li>` : ''}
+      </ul>` : '<p class="muted">No notes.</p>'}
+    </div>`).join('');
+}
+
+function renderThemes() {
+  const since = Date.now() - 30 * 86_400_000;
+  const words = topWords(state.entries.filter((e) => e.createdAt >= since));
+  if (!words.length) {
+    $('#themes').innerHTML = '<p class="muted">Themes appear once your notes are transcribed.</p>';
+    return;
+  }
+  const max = words[0][1];
+  const min = words[words.length - 1][1];
+  // shuffle-free but not strictly sorted, so it reads like a cloud
+  const ordered = words.map((w, i) => [w, i]).sort((a, b) => (a[1] % 3) - (b[1] % 3) || a[1] - b[1]).map(([w]) => w);
+  $('#themes').innerHTML = ordered.map(([w, c]) => {
+    const size = max === min ? 1.3 : 0.95 + ((c - min) / (max - min)) * 1.25;
+    return `<button type="button" class="theme-word" data-word="${esc(w)}" style="font-size:${size.toFixed(2)}rem" title="${c} times">${esc(w)}</button>`;
+  }).join(' ');
+}
+
+function moodRows(groups) {
+  const rows = groups.filter(([, xs]) => xs.length);
+  if (!rows.length) return '';
+  return rows.map(([label, xs]) => {
+    const a = avg(xs);
+    return `<div class="mood-bar insight"><span class="label-cell">${esc(label)}</span>
+      <div class="track"><i style="width:${((a - 1) / 4) * 100}%"></i></div><span class="n">${moodOf(Math.round(a)).e}</span></div>`;
+  }).join('');
+}
+
+function renderMoodInsights() {
+  const withMood = state.entries.filter((e) => e.mood);
+  const box = $('#mood-insights');
+  if (withMood.length < 3) {
+    box.innerHTML = '<p class="muted">Add a mood to at least 3 notes to see patterns.</p>';
+    return;
+  }
+  const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const byDay = days.map((d, i) => [d, withMood.filter((e) => (new Date(e.createdAt).getDay() + 6) % 7 === i).map((e) => e.mood)]);
+  const part = (h) => (h < 5 ? 'Night' : h < 12 ? 'Morning' : h < 17 ? 'Afternoon' : h < 22 ? 'Evening' : 'Night');
+  const parts = ['Morning', 'Afternoon', 'Evening', 'Night'];
+  const byTime = parts.map((p) => [p, withMood.filter((e) => part(new Date(e.createdAt).getHours()) === p).map((e) => e.mood)]);
+  const tagMap = new Map();
+  for (const e of withMood) for (const t of e.tags) tagMap.set(t, [...(tagMap.get(t) || []), e.mood]);
+  const byTag = [...tagMap.entries()].filter(([, xs]) => xs.length >= 2)
+    .sort((a, b) => avg(b[1]) - avg(a[1])).slice(0, 6).map(([t, xs]) => [`#${t}`, xs]);
+  const best = byDay.filter(([, xs]) => xs.length).sort((a, b) => avg(b[1]) - avg(a[1]))[0];
+  box.innerHTML = `
+    ${best ? `<p class="insight-line">Your best days tend to be <b>${{ Mon: 'Mondays', Tue: 'Tuesdays', Wed: 'Wednesdays', Thu: 'Thursdays', Fri: 'Fridays', Sat: 'Saturdays', Sun: 'Sundays' }[best[0]]}</b>.</p>` : ''}
+    <h4>By day of week</h4>${moodRows(byDay)}
+    <h4>By time of day</h4>${moodRows(byTime)}
+    ${byTag.length ? `<h4>By tag</h4>${moodRows(byTag)}` : ''}`;
+}
+
 function renderCalendar() {
+  renderRecap();
+  renderThemes();
+  renderMoodInsights();
   const { current, longest } = streaks(state.entries);
   const totalMs = state.entries.reduce((s, e) => s + e.durationMs, 0);
   $('#stats').innerHTML = [
@@ -1453,6 +1654,41 @@ async function exportZip() {
   await markBackedUp();
 }
 
+/** All notes as one readable Markdown document, oldest first. */
+function buildMarkdown() {
+  const lines = ['# Voice Journal', '', `_Exported ${new Date().toLocaleString()}_`, ''];
+  let day = null;
+  for (const e of [...state.entries].sort((a, b) => a.createdAt - b.createdAt)) {
+    const key = dayKey(e.createdAt);
+    if (key !== day) {
+      day = key;
+      lines.push(`## ${new Date(e.createdAt).toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}`, '');
+    }
+    const mood = moodOf(e.mood);
+    lines.push(`### ${fmtTime(e.createdAt)} · ${e.title || 'Untitled'}${e.starred ? ' ★' : ''}`);
+    const meta = [fmtDuration(playLength(e) * 1000), mood ? `${mood.e} ${mood.l}` : null, e.tags.length ? e.tags.map((t) => `#${t}`).join(' ') : null]
+      .filter(Boolean).join(' · ');
+    lines.push(`_${meta}_`, '');
+    if (e.prompt) lines.push(`> ${e.prompt}`, '');
+    lines.push(e.transcript ? e.transcript : '_(no transcript)_', '');
+    if (e.photos?.length) lines.push(`_${e.photos.length} photo${e.photos.length === 1 ? '' : 's'} in the app_`, '');
+  }
+  return new Blob([lines.join('\n')], { type: 'text/markdown' });
+}
+
+async function exportText() {
+  if (!state.entries.length) { toast('Nothing to export yet.'); return; }
+  const blob = buildMarkdown();
+  const name = `voice-journal-${dayKey(Date.now())}.md`;
+  const file = new File([blob], name, { type: 'text/markdown' });
+  try {
+    if (navigator.canShare?.({ files: [file] })) { await navigator.share({ files: [file], title: 'Voice Journal' }); return; }
+  } catch (err) {
+    if (err.name === 'AbortError') return;
+  }
+  download(blob, name);
+}
+
 function buildBackup() {
   const files = [];
   const meta = [];
@@ -1469,6 +1705,7 @@ function buildBackup() {
   }
   const manifest = { app: 'voice-journal', version: 1, exportedAt: new Date().toISOString(), entries: meta };
   files.unshift({ name: 'journal.json', data: new TextEncoder().encode(JSON.stringify(manifest, null, 2)) });
+
   return createZip(files);
 }
 
@@ -1499,6 +1736,20 @@ async function markBackedUp() {
 }
 
 const notBackedUp = () => state.entries.filter((e) => e.createdAt > (state.lastExport || 0)).length;
+
+/** On Sunday and Monday, point to last week's recap once. */
+function renderRecapBanner() {
+  const banner = $('#recap-banner');
+  const today = new Date().getDay();
+  const thisWeek = weekStart(new Date());
+  const key = dayKey(today === 0 ? thisWeek : new Date(+thisWeek - 7 * 86_400_000));
+  const from = today === 0 ? +thisWeek : +thisWeek - 7 * 86_400_000;
+  const to = today === 0 ? Date.now() : +thisWeek;
+  const count = state.entries.filter((e) => e.createdAt >= from && e.createdAt < to).length;
+  banner.hidden = !((today === 0 || today === 1) && count && state.recapSeen !== key);
+  banner.dataset.week = key;
+  if (!banner.hidden) $('#recap-banner-text').textContent = `Your weekly recap is ready: ${count} note${count === 1 ? '' : 's'} ${today === 0 ? 'this' : 'last'} week.`;
+}
 
 /** A gentle reminder on the Record screen when notes exist only on this phone. */
 function renderBackupBanner() {
@@ -1582,6 +1833,8 @@ async function refreshMics() {
 }
 
 async function renderSettings() {
+  renderPromptSettings();
+  renderReminder();
   if (state.tx.enabled) {
     downloadedModels().then((list) => {
       const ready = list.includes(state.tx.model) || list.includes(currentModelFor(state.tx.model));
@@ -1749,6 +2002,47 @@ function bindEvents() {
   $('#lock-now').addEventListener('click', lock);
 
   $('#export-btn').addEventListener('click', exportZip);
+  $('#export-text').addEventListener('click', exportText);
+  $('#prompt-packs').addEventListener('change', async (ev) => {
+    const key = ev.target.dataset.pack;
+    if (!key) return;
+    const packs = new Set(state.promptPacks || Object.keys(PACKS));
+    if (ev.target.checked) packs.add(key); else packs.delete(key);
+    state.promptPacks = Object.keys(PACKS).filter((k) => packs.has(k));
+    await savePromptSettings();
+  });
+  $('#custom-prompt-form').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const text = $('#custom-prompt').value.trim();
+    if (!text) return;
+    state.customPrompts = [...(state.customPrompts || []), text];
+    $('#custom-prompt').value = '';
+    await savePromptSettings();
+    toast('Prompt added.');
+  });
+  $('#custom-prompt-list').addEventListener('click', async (ev) => {
+    const btn = ev.target.closest('[data-remove-prompt]');
+    if (!btn) return;
+    state.customPrompts.splice(Number(btn.dataset.removePrompt), 1);
+    await savePromptSettings();
+  });
+  $('#reminder-on').addEventListener('change', (ev) => setReminder(ev.target.checked));
+  $('#reminder-time').addEventListener('change', () => setReminder(state.reminder.on));
+  $('#on-this-day').addEventListener('click', onListClick);
+  $('#themes').addEventListener('click', (ev) => {
+    const w = ev.target.closest('[data-word]');
+    if (!w) return;
+    state.filterDay = null;
+    showView('journal');
+    $('#search').value = w.dataset.word;
+    renderJournal();
+  });
+  $('#recap-open').addEventListener('click', async () => {
+    state.recapSeen = $('#recap-banner').dataset.week;
+    await db.setMeta('recapSeen', state.recapSeen);
+    $('#recap-banner').hidden = true;
+    showView('calendar');
+  });
   $('#share-btn').addEventListener('click', shareZip);
   $('#backup-now').addEventListener('click', () => (canShareFiles() ? shareZip() : exportZip()));
   $('#backup-later').addEventListener('click', async () => {
@@ -1829,6 +2123,11 @@ async function init() {
     state.wordFixes = (await db.getMeta('wordFixes')) || [];
     state.lastExport = (await db.getMeta('lastExport')) || 0;
     state.backupSnoozeUntil = (await db.getMeta('backupSnoozeUntil')) || 0;
+    state.promptPacks = (await db.getMeta('promptPacks')) || null;
+    state.customPrompts = (await db.getMeta('customPrompts')) || [];
+    state.reminder = (await db.getMeta('reminder')) || { on: false, time: '20:00' };
+    state.recapSeen = (await db.getMeta('recapSeen')) || null;
+    renderPrompt();
     await recoverDraft();
     // Give older transcribed notes a title and summary once.
     for (const e of state.entries) {
@@ -1840,6 +2139,7 @@ async function init() {
   renderStreakBadge();
   renderRecent();
   renderBackupBanner();
+  renderRecapBanner();
   // Opened from the "Record now" home-screen shortcut: start recording straight away.
   const params = new URLSearchParams(location.search);
   if (params.get('action') === 'record') {

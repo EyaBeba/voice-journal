@@ -1,4 +1,4 @@
-export const PROMPTS = [
+const REFLECTION = [
   'What took up most of your headspace today?',
   'One win and one lesson from today.',
   'What drained your energy, and what gave it back?',
@@ -36,3 +36,73 @@ export const PROMPTS = [
   'Rate your day out of ten. Why that number?',
   'What do you want to let go of before tomorrow?',
 ];
+
+const GRATITUDE = [
+  'Name three small things that went right today.',
+  'Who are you thankful for this week, and have you told them?',
+  'What is something you use every day that you are glad to have?',
+  'What made you smile today?',
+  'What is a challenge you are grateful for, looking back?',
+  'Describe a place that makes you feel at home.',
+  'What is a kindness someone showed you recently?',
+  'What about your body are you thankful for today?',
+  'What is a simple pleasure you enjoyed this week?',
+  'Which song, book or show lifted your mood lately?',
+  'What skill do you have that you are glad you learned?',
+  'What is something beautiful you noticed today?',
+];
+
+const WORK = [
+  'What did you get done today that you are proud of?',
+  'What is blocking you at work right now?',
+  'What would make tomorrow at work easier?',
+  'Which task are you putting off, and why?',
+  'What did you learn from a colleague recently?',
+  'Where did your focus go today? Where did it leak away?',
+  'What does a good work week look like for you?',
+  'What is one thing you would change about how you work?',
+  'Which part of your job gives you energy?',
+  'What feedback have you received, and what do you make of it?',
+  'What are your top three priorities for this week?',
+  'Is your work matching what you want long-term? Why or why not?',
+];
+
+const RELATIONSHIPS = [
+  'Who did you connect with today? How did it feel?',
+  'Is there a conversation you need to have with someone?',
+  'Who do you want to spend more time with?',
+  'How did you show up for someone you love recently?',
+  'What is a relationship that has changed lately?',
+  'What do you appreciate most about your closest friend?',
+  'Did anyone frustrate you today? What was underneath it?',
+  'Who would you like to reconnect with?',
+  'What boundary would help you right now?',
+  'Describe a memory with family that makes you smile.',
+  'How do you like to be supported when things are hard?',
+  'What did someone teach you without meaning to?',
+];
+
+const BODY_MIND = [
+  'How did you sleep, and how do you feel because of it?',
+  'What did you eat today, and how did it make you feel?',
+  'When did you move your body today?',
+  'What is your stress level right now, out of ten? Why?',
+  'What helps you calm down when your mind is racing?',
+  'Where do you feel tension right now?',
+  'What is one thing you could do tonight to rest better?',
+  'How much time did you spend on screens today? Was it worth it?',
+  'What thought kept coming back today?',
+  'When did you feel most present today?',
+  'What does your body need more of this week?',
+  'What is a small healthy habit you want to start?',
+];
+
+export const PACKS = {
+  reflection: { label: 'Reflection', prompts: REFLECTION },
+  gratitude: { label: 'Gratitude', prompts: GRATITUDE },
+  work: { label: 'Work', prompts: WORK },
+  relationships: { label: 'Relationships', prompts: RELATIONSHIPS },
+  body: { label: 'Body & mind', prompts: BODY_MIND },
+};
+
+export const PROMPTS = Object.values(PACKS).flatMap((pack) => pack.prompts);
