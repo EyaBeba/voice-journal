@@ -15,9 +15,11 @@ const MOODS = [
 ];
 const moodOf = (v) => MOODS.find((m) => m.v === v);
 const AUTO_LOCK_MS = 60_000;
-const APP_VERSION = 9;
+const APP_VERSION = 10;
 const PLAY_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/></svg>';
 const PAUSE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.5"/><rect x="14" y="5" width="4" height="14" rx="1.5"/></svg>';
+const STAR_ICON = '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/></svg>';
+const SPEEDS = [1, 1.25, 1.5, 2];
 const EDIT_ICON = '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg>';
 
 const state = {
@@ -160,7 +162,25 @@ function todaysPrompt() {
 const renderPrompt = () => { $('#prompt-text').textContent = todaysPrompt(); };
 
 /* ---------- recording ---------- */
-const rec = { mr: null, stream: null, chunks: [], start: 0, timer: null, ctx: null, analyser: null, raf: 0, peak: 0, frames: 0 };
+const rec = { mr: null, stream: null, chunks: [], start: 0, timer: null, ctx: null, analyser: null, raf: 0, peak: 0, frames: 0, pausedMs: 0, pauseAt: null };
+/** Recorded time so far, not counting pauses. */
+const recElapsed = () => (rec.pauseAt ?? Date.now()) - rec.start - rec.pausedMs;
+
+function togglePause() {
+  if (!rec.mr) return;
+  if (rec.mr.state === 'recording') {
+    rec.mr.pause();
+    rec.pauseAt = Date.now();
+  } else if (rec.mr.state === 'paused') {
+    rec.pausedMs += Date.now() - rec.pauseAt;
+    rec.pauseAt = null;
+    rec.mr.resume();
+  }
+  const paused = rec.mr.state === 'paused';
+  $('#pause-btn').textContent = paused ? 'Resume' : 'Pause';
+  $('#rec-btn').classList.toggle('paused', paused);
+  $('#rec-hint').textContent = paused ? 'Paused · tap Resume, or the button to finish' : 'Recording… tap to stop';
+}
 
 function pickMime() {
   const types = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/ogg;codecs=opus', 'audio/webm'];
@@ -212,6 +232,10 @@ async function startRecording() {
   rec.mr.onstop = onRecordingStop;
   rec.mr.start(1000);
   rec.start = Date.now();
+  rec.pausedMs = 0;
+  rec.pauseAt = null;
+  $('#pause-btn').hidden = !('pause' in rec.mr);
+  $('#pause-btn').textContent = 'Pause';
   db.setMeta('draft', { id: rec.draftId, start: rec.start, mime: rec.mr.mimeType || mime || 'audio/webm', prompt: todaysPrompt() })
     .catch(() => {});
   // If the mic is taken away (a phone call, Bluetooth change), keep what was recorded.
@@ -230,7 +254,7 @@ async function startRecording() {
   btn.setAttribute('aria-label', 'Stop recording');
   $('#rec-hint').textContent = 'Recording… tap to stop';
   $('#timer').textContent = '0:00';
-  rec.timer = setInterval(() => { $('#timer').textContent = fmtDuration(Date.now() - rec.start); }, 250);
+  rec.timer = setInterval(() => { $('#timer').textContent = fmtDuration(recElapsed()); }, 250);
 
   try {
     rec.ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -290,6 +314,9 @@ async function recoverDraft() {
 
 function cleanupRecorder() {
   keepScreenOn(false);
+  $('#pause-btn').hidden = true;
+  $('#rec-btn').classList.remove('paused');
+  rec.pauseAt = null;
   clearInterval(rec.timer);
   cancelAnimationFrame(rec.raf);
   rec.stream?.getTracks().forEach((t) => t.stop());
@@ -304,7 +331,7 @@ function cleanupRecorder() {
 }
 
 async function onRecordingStop() {
-  const durationMs = Date.now() - rec.start;
+  const durationMs = recElapsed();
   const type = rec.mr?.mimeType || 'audio/webm';
   const blob = new Blob(rec.chunks, { type });
   const start = rec.start;
@@ -409,17 +436,45 @@ function startPlayer(id) {
   if (!entry) return false;
   player.url = URL.createObjectURL(blobOf(entry));
   player.audio.src = player.url;
+  player.audio.playbackRate = readSpeed();
+  player.audio.defaultPlaybackRate = player.audio.playbackRate;
   player.id = id;
   return true;
 }
 
 function togglePlay(id) {
+  const entry = state.entries.find((e) => e.id === id);
+  const start = entry?.trimStart || 0;
   if (player.id === id) {
-    if (player.audio.paused) player.audio.play().catch(() => toast("Couldn't play this recording."));
-    else player.audio.pause();
+    if (player.audio.paused) {
+      // finished (or past the trimmed end): start again from the beginning
+      if (player.audio.ended || (entry?.trimEnd && player.audio.currentTime >= entry.trimEnd - 0.05)) player.audio.currentTime = start;
+      player.audio.play().catch(() => toast("Couldn't play this recording."));
+    } else {
+      player.audio.pause();
+    }
     return;
   }
+  if (start > 0) { seekTo(id, start); return; }
   if (startPlayer(id)) player.audio.play().catch(() => toast("Couldn't play this recording."));
+}
+
+function readSpeed() {
+  try { return Number(localStorage.getItem('vj-speed')) || 1; } catch { return 1; }
+}
+
+function cycleSpeed() {
+  const next = SPEEDS[(SPEEDS.indexOf(player.audio.playbackRate) + 1) % SPEEDS.length] || 1;
+  player.audio.playbackRate = next;
+  player.audio.defaultPlaybackRate = next;
+  try { localStorage.setItem('vj-speed', String(next)); } catch { /* fine */ }
+  $$('.speed-btn').forEach((b) => { b.textContent = `${next}×`; });
+}
+
+/** Seconds of a note that actually play, after trimming. */
+function playLength(e) {
+  const end = e.trimEnd ?? e.durationMs / 1000;
+  return Math.max(0, end - (e.trimStart || 0));
 }
 
 /** Jump to a moment in a note (seconds) and play from there. */
@@ -591,6 +646,8 @@ player.audio.addEventListener('ended', () => { syncPlayerUI(); });
 player.audio.addEventListener('timeupdate', () => {
   if (player.fixingDuration) return;
   const entry = state.entries.find((e) => e.id === player.id);
+  // stop at the trimmed end
+  if (entry?.trimEnd && player.audio.currentTime >= entry.trimEnd && !player.audio.paused) player.audio.pause();
   if (!entry) return;
   // Recorded webm can report duration=Infinity, so fall back to the duration we measured.
   const total = Number.isFinite(player.audio.duration) ? player.audio.duration * 1000 : entry.durationMs;
@@ -607,15 +664,19 @@ function entryCard(e) {
       <button class="play" type="button" data-action="play" aria-label="Play" data-icon="play">${PLAY_ICON}</button>
       <div class="entry-main">
         <div class="entry-title">${esc(e.title || 'Untitled entry')}</div>
-        <div class="entry-meta">${fmtTime(e.createdAt)} · ${fmtDuration(e.durationMs)}</div>
+        <div class="entry-meta">${fmtTime(e.createdAt)} · ${fmtDuration(playLength(e) * 1000)}${e.recovered ? ' · recovered' : ''}</div>
         ${transcriptLine(e)}
         ${e.prompt ? `<div class="entry-prompt">“${esc(e.prompt)}”</div>` : ''}
         ${e.tags.length ? `<div class="entry-tags">${e.tags.map((t) => `<span class="tag">#${esc(t)}</span>`).join('')}</div>` : ''}
+        ${e.photos?.length ? `<div class="entry-photos">${e.photos.slice(0, 4).map((p, i) =>
+          `<button type="button" class="thumb" data-action="photo" data-photo="${i}" aria-label="Open photo ${i + 1}"><img src="${photoUrl(p)}" alt="" loading="lazy"></button>`).join('')}${e.photos.length > 4 ? `<span class="more-photos">+${e.photos.length - 4}</span>` : ''}</div>` : ''}
         <div class="progress"><i></i></div>
       </div>
       <div class="entry-actions">
         <span class="entry-mood" title="${mood ? mood.l : 'No mood'}">${mood ? mood.e : ''}</span>
+        <button class="icon-btn star-btn${e.starred ? ' on' : ''}" type="button" data-action="star" aria-pressed="${!!e.starred}" aria-label="${e.starred ? 'Remove from favorites' : 'Add to favorites'}">${STAR_ICON}</button>
         <button class="icon-btn" type="button" data-action="edit" aria-label="Edit entry">${EDIT_ICON}</button>
+        <button class="speed-btn" type="button" data-action="speed" aria-label="Playback speed">${readSpeed()}×</button>
       </div>
     </article>`;
 }
@@ -665,6 +726,7 @@ function renderJournal() {
   const list = state.entries.filter((e) =>
     (!state.filterDay || dayKey(e.createdAt) === state.filterDay)
     && (!mood || e.mood === mood)
+    && (!state.filterStarred || e.starred)
     && (!tag || e.tags.includes(tag))
     && (!q || [e.title, e.prompt, e.transcript, e.summary, ...e.tags].join(' ').toLowerCase().includes(q)));
 
@@ -678,6 +740,114 @@ function renderJournal() {
   renderList($('#entry-list'), list, empty);
 }
 
+async function toggleStar(id) {
+  const entry = state.entries.find((e) => e.id === id);
+  if (!entry) return;
+  entry.starred = !entry.starred;
+  await db.putEntry(entry);
+  toast(entry.starred ? 'Added to favorites' : 'Removed from favorites');
+  rerenderActive();
+}
+
+/* Photos: stored as JPEG bytes in the entry; object URLs are cached per photo. */
+const photoUrls = new WeakMap();
+function photoUrl(p) {
+  if (!photoUrls.has(p.data)) photoUrls.set(p.data, URL.createObjectURL(new Blob([p.data], { type: p.type || 'image/jpeg' })));
+  return photoUrls.get(p.data);
+}
+
+function openPhoto(p) {
+  $('#photo-view img').src = photoUrl(p);
+  $('#photo-view').showModal();
+}
+
+/** Shrink a picked image (max 1600px, JPEG) so photos don't eat the phone's storage. */
+async function preparePhoto(file) {
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, 1600 / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(bitmap.width * scale);
+  canvas.height = Math.round(bitmap.height * scale);
+  canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close?.();
+  const blob = await new Promise((res) => canvas.toBlob(res, 'image/jpeg', 0.82));
+  return { type: 'image/jpeg', data: await blob.arrayBuffer() };
+}
+
+function renderEditorPhotos() {
+  const photos = state.editing?.photos || [];
+  $('#editor-photos').innerHTML = photos.map((p, i) => `
+    <div class="thumb"><img src="${photoUrl(p)}" alt="">
+      <button type="button" class="thumb-remove" data-remove-photo="${i}" aria-label="Remove photo">&times;</button></div>`).join('');
+}
+
+/* Trim (non-destructive: the full recording is kept, playback skips the trimmed parts). */
+function setupTrim(entry) {
+  const total = Math.max(0.5, entry.durationMs / 1000);
+  const start = $('#trim-start');
+  const end = $('#trim-end');
+  for (const r of [start, end]) { r.max = total.toFixed(1); r.step = '0.1'; }
+  start.value = entry.trimStart || 0;
+  end.value = entry.trimEnd ?? total;
+  updateTrimLabels();
+}
+
+function updateTrimLabels(changed) {
+  const start = $('#trim-start');
+  const end = $('#trim-end');
+  if (Number(start.value) > Number(end.value) - 0.5) {
+    if (changed === 'end') end.value = Math.min(Number(end.max), Number(start.value) + 0.5);
+    else start.value = Math.max(0, Number(end.value) - 0.5);
+  }
+  $('#trim-start-label').textContent = fmtClock(Number(start.value));
+  $('#trim-end-label').textContent = fmtClock(Number(end.value));
+  $('#trim-length').textContent = `Plays ${fmtClock(Number(end.value) - Number(start.value))}`;
+}
+
+const fmtClock = (sec) => `${Math.floor(sec / 60)}:${(sec % 60).toFixed(1).padStart(4, '0')}`;
+
+/** Find where speech starts and ends, so silence at either end can be trimmed. */
+async function autoTrimSilence() {
+  const entry = state.entries.find((e) => e.id === state.editing?.id);
+  if (!entry) return;
+  try {
+    const ctx = new OfflineAudioContext(1, 1, 16000);
+    const buf = await ctx.decodeAudioData(entry.audio.slice(0));
+    const data = buf.getChannelData(0);
+    const win = 800; // 50 ms at 16 kHz
+    const levels = [];
+    for (let i = 0; i < data.length; i += win) {
+      let sum = 0;
+      for (let j = i; j < Math.min(i + win, data.length); j++) sum += data[j] * data[j];
+      levels.push(Math.sqrt(sum / win));
+    }
+    const peak = Math.max(...levels);
+    const threshold = Math.max(0.01, peak * 0.12);
+    const first = levels.findIndex((l) => l > threshold);
+    const last = levels.length - 1 - [...levels].reverse().findIndex((l) => l > threshold);
+    if (first < 0) { toast('No speech found to trim around.'); return; }
+    const total = buf.duration;
+    $('#trim-end').max = total.toFixed(1);
+    $('#trim-start').max = total.toFixed(1);
+    $('#trim-start').value = Math.max(0, first * 0.05 - 0.25).toFixed(1);
+    $('#trim-end').value = Math.min(total, (last + 1) * 0.05 + 0.35).toFixed(1);
+    updateTrimLabels();
+    toast('Silence at the start and end marked. Save to keep it.');
+  } catch (err) {
+    toast(`Couldn't analyse this recording: ${err.message || err}`);
+  }
+}
+
+function previewTrim() {
+  const a = $('#editor-audio');
+  const start = Number($('#trim-start').value);
+  const end = Number($('#trim-end').value);
+  a.currentTime = start;
+  a.play().catch(() => {});
+  const stop = () => { if (a.currentTime >= end) { a.pause(); a.removeEventListener('timeupdate', stop); } };
+  a.addEventListener('timeupdate', stop);
+}
+
 function onListClick(ev) {
   const seg = ev.target.closest('.seg');
   if (seg) {
@@ -688,6 +858,12 @@ function onListClick(ev) {
   if (!btn) return;
   const id = btn.closest('.entry')?.dataset.id;
   if (btn.dataset.action === 'play') togglePlay(id);
+  if (btn.dataset.action === 'speed') cycleSpeed();
+  if (btn.dataset.action === 'star') toggleStar(id);
+  if (btn.dataset.action === 'photo') {
+    const entry = state.entries.find((e) => e.id === id);
+    if (entry?.photos?.[btn.dataset.photo]) openPhoto(entry.photos[btn.dataset.photo]);
+  }
   if (btn.dataset.action === 'edit') {
     const entry = state.entries.find((e) => e.id === id);
     if (entry) openEditor(entry, false);
@@ -708,8 +884,11 @@ function renderTagSuggestions() {
 }
 
 function openEditor(entry, isNew) {
-  state.editing = { id: entry.id, isNew, prompt: entry.prompt };
+  state.editing = { id: entry.id, isNew, prompt: entry.prompt, photos: [...(entry.photos || [])] };
   const f = $('#entry-form');
+  renderEditorPhotos();
+  setupTrim(entry);
+  $('#trim-details').open = !!(entry.trimStart || entry.trimEnd);
   f.elements.entryTitle.value = entry.title || '';
   f.elements.tags.value = entry.tags.join(', ');
   $$('input[name="mood"]', f).forEach((r) => { r.checked = Number(r.value) === entry.mood; });
@@ -742,6 +921,13 @@ async function saveEditor(ev) {
     entry.mood = mood ? Number(mood.value) : null;
     entry.tags = parseTags(f.elements.tags.value);
     entry.prompt = f.elements.usePrompt.checked ? state.editing.prompt : null;
+    entry.photos = state.editing.photos;
+    const total = entry.durationMs / 1000;
+    const tStart = Number($('#trim-start').value);
+    const tEnd = Number($('#trim-end').value);
+    entry.trimStart = tStart > 0.05 ? tStart : null;
+    entry.trimEnd = tEnd < Number($('#trim-end').max) - 0.05 && tEnd < total ? tEnd : null;
+    if (player.id === entry.id) stopPlayer();
     if (state.editing.transcriptDirty) {
       const edited = f.elements.transcript.value.trim();
       if (edited !== entry.transcript) { entry.segments = null; entry.words = null; }
@@ -1219,6 +1405,7 @@ async function onUnlock(ev) {
   ev.preventDefault();
   if (await checkPin($('#lock-pin').value)) {
     $('#lock').hidden = true;
+    if (state.pendingRecord) { state.pendingRecord = false; startRecording(); }
     return;
   }
   const card = $('#lock-form');
@@ -1272,8 +1459,13 @@ function buildBackup() {
   for (const e of state.entries) {
     const name = `audio/${dayKey(e.createdAt)}_${e.id}.${extFor(e.mime)}`;
     files.push({ name, data: new Uint8Array(e.audio) });
-    const { audio, transcriptStatus, transcriptError, txAttempts, ...rest } = e;
-    meta.push({ ...rest, audioFile: name });
+    const { audio, transcriptStatus, transcriptError, txAttempts, photos, ...rest } = e;
+    const photoFiles = (photos || []).map((p, i) => {
+      const file = `photos/${dayKey(e.createdAt)}_${e.id}_${i + 1}.jpg`;
+      files.push({ name: file, data: new Uint8Array(p.data) });
+      return { file, type: p.type };
+    });
+    meta.push({ ...rest, audioFile: name, photos: photoFiles });
   }
   const manifest = { app: 'voice-journal', version: 1, exportedAt: new Date().toISOString(), entries: meta };
   files.unshift({ name: 'journal.json', data: new TextEncoder().encode(JSON.stringify(manifest, null, 2)) });
@@ -1353,6 +1545,12 @@ async function importZip(file) {
             .map((x) => ({ t: x.t, s: x.s, e: typeof x.e === 'number' ? x.e : null }))
           : null,
         transcriptStatus: typeof m.transcript === 'string' && m.transcript ? 'done' : null,
+        starred: m.starred === true,
+        trimStart: typeof m.trimStart === 'number' ? m.trimStart : null,
+        trimEnd: typeof m.trimEnd === 'number' ? m.trimEnd : null,
+        photos: Array.isArray(m.photos)
+          ? m.photos.filter((p) => p && files[p.file]).map((p) => ({ type: typeof p.type === 'string' ? p.type : 'image/jpeg', data: files[p.file].slice().buffer }))
+          : [],
         audio: audio.slice().buffer,
       });
       added++;
@@ -1453,6 +1651,32 @@ function bindEvents() {
   });
   $$('.tabs button').forEach((b) => b.addEventListener('click', () => showView(b.dataset.view)));
   $('#rec-btn').addEventListener('click', () => (rec.mr ? stopRecording() : startRecording()));
+  $('#pause-btn').addEventListener('click', togglePause);
+  $('#starred-chip').addEventListener('click', () => {
+    state.filterStarred = !state.filterStarred;
+    $('#starred-chip').classList.toggle('active', state.filterStarred);
+    $('#starred-chip').setAttribute('aria-pressed', String(state.filterStarred));
+    renderJournal();
+  });
+  $('#photo-input').addEventListener('change', async (ev) => {
+    const picked = [...ev.target.files];
+    ev.target.value = '';
+    for (const file of picked) {
+      try { state.editing?.photos.push(await preparePhoto(file)); } catch { toast('Could not add that photo.'); }
+    }
+    renderEditorPhotos();
+  });
+  $('#editor-photos').addEventListener('click', (ev) => {
+    const btn = ev.target.closest('[data-remove-photo]');
+    if (!btn || !state.editing) return;
+    state.editing.photos.splice(Number(btn.dataset.removePhoto), 1);
+    renderEditorPhotos();
+  });
+  $('#trim-start').addEventListener('input', () => updateTrimLabels('start'));
+  $('#trim-end').addEventListener('input', () => updateTrimLabels('end'));
+  $('#trim-auto').addEventListener('click', autoTrimSilence);
+  $('#trim-preview').addEventListener('click', previewTrim);
+  $('#photo-view').addEventListener('click', () => $('#photo-view').close());
   $('#prompt-shuffle').addEventListener('click', () => { state.promptShift++; renderPrompt(); });
 
   $('#recent').addEventListener('click', onListClick);
@@ -1616,6 +1840,13 @@ async function init() {
   renderStreakBadge();
   renderRecent();
   renderBackupBanner();
+  // Opened from the "Record now" home-screen shortcut: start recording straight away.
+  const params = new URLSearchParams(location.search);
+  if (params.get('action') === 'record') {
+    history.replaceState(null, '', location.pathname);
+    if (state.hasPin) state.pendingRecord = true;
+    else startRecording();
+  }
   if (state.txNeedsUpdate) updateModelInBackground();
   window.addEventListener('online', retryFailedTranscriptions);
   if (state.tx.enabled) {

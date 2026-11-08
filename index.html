@@ -67,6 +67,7 @@
         <div id="timer" class="timer">0:00</div>
         <button id="rec-btn" class="rec-btn" type="button" aria-label="Start recording"><span></span></button>
         <p id="rec-hint" class="hint">Tap to start recording</p>
+        <button id="pause-btn" class="btn pause-btn" type="button" hidden>Pause</button>
       </div>
 
       <div id="recent" class="recent"></div>
@@ -80,7 +81,10 @@
           <select id="filter-mood" aria-label="Filter by mood"></select>
           <select id="filter-tag" aria-label="Filter by tag"></select>
         </div>
-        <button id="day-chip" class="chip active" type="button" hidden></button>
+        <div class="chips filter-chips">
+          <button id="starred-chip" class="chip" type="button" aria-pressed="false">&#9733; Favorites</button>
+          <button id="day-chip" class="chip active" type="button" hidden></button>
+        </div>
       </div>
       <div id="entry-list"></div>
     </section>
@@ -231,6 +235,27 @@
         <button id="editor-transcribe" class="btn small-btn" type="button" hidden>Transcribe</button>
       </div>
 
+      <div class="field">
+        <span>Photos</span>
+        <div class="photo-row">
+          <div id="editor-photos" class="editor-photos"></div>
+          <label class="btn small-btn" for="photo-input">Add photo</label>
+          <input id="photo-input" type="file" accept="image/*" multiple hidden>
+        </div>
+      </div>
+
+      <details id="trim-details" class="field trim">
+        <summary>Trim</summary>
+        <p class="muted small">Cut silence or mistakes at the start and end. The full recording is kept, so you can undo this later.</p>
+        <label class="trim-row"><span>Start <b id="trim-start-label">0:00.0</b></span><input id="trim-start" type="range" min="0" step="0.1"></label>
+        <label class="trim-row"><span>End <b id="trim-end-label">0:00.0</b></span><input id="trim-end" type="range" min="0" step="0.1"></label>
+        <div class="row" style="align-items:center">
+          <button id="trim-auto" class="btn small-btn" type="button">Trim silence</button>
+          <button id="trim-preview" class="btn small-btn" type="button">Preview</button>
+          <span id="trim-length" class="muted small" style="margin:6px 0 0"></span>
+        </div>
+      </details>
+
       <fieldset class="field">
         <legend>Mood</legend>
         <div id="mood-picker" class="mood-picker"></div>
@@ -253,6 +278,8 @@
       </div>
     </form>
   </dialog>
+
+  <dialog id="photo-view" class="photo-view" aria-label="Photo"><img alt=""></dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 </body>

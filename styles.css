@@ -531,3 +531,47 @@ dialog audio { width: 100%; margin: 14px 0 4px; height: 40px; }
 
 /* Titles may wrap to two lines instead of being cut off */
 .entry-title { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; }
+
+/* Pause while recording */
+.pause-btn { margin-top: 16px; }
+.rec-btn.paused span { width: 76px; height: 76px; border-radius: 50%; opacity: .55; }
+.rec-btn.paused::after { animation: none; opacity: 0; }
+
+/* Favorites, speed */
+.star-btn.on { color: var(--accent-text); }
+.star-btn.on svg { fill: currentColor; }
+.speed-btn {
+  display: none; border: 1px solid var(--border); background: none; color: var(--accent-text); border-radius: 99px;
+  font-size: .62rem; font-weight: 600; letter-spacing: .08em; padding: 4px 8px; margin-top: 2px;
+}
+.entry.open .speed-btn { display: inline-block; }
+.filter-chips { margin-top: 10px; }
+.filter-chips .chip { margin-top: 0; }
+
+/* Photos */
+.entry-photos { display: flex; gap: 6px; margin-top: 12px; align-items: center; }
+.thumb {
+  position: relative; width: 56px; height: 56px; border-radius: 8px; overflow: hidden; padding: 0;
+  border: 1px solid var(--border); background: var(--surface-2); flex: none;
+}
+.thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.more-photos { font-size: .75rem; color: var(--muted); }
+.photo-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.editor-photos { display: flex; gap: 6px; flex-wrap: wrap; }
+.thumb-remove {
+  position: absolute; top: 2px; right: 2px; width: 22px; height: 22px; border-radius: 50%; border: 0; padding: 0;
+  background: rgb(0 0 0 / 65%); color: #fff; font-size: 14px; line-height: 22px;
+}
+.photo-view { padding: 0; background: #000; border: 0; max-width: 100vw; max-height: 100dvh; width: auto; }
+.photo-view img { display: block; max-width: 100vw; max-height: 92dvh; object-fit: contain; }
+
+/* Trim */
+.trim summary {
+  cursor: pointer; font-size: .62rem; font-weight: 600; letter-spacing: .22em; text-transform: uppercase; color: var(--muted);
+  list-style: none;
+}
+.trim summary::after { content: " +"; color: var(--accent-text); }
+.trim[open] summary::after { content: " –"; }
+.trim-row { display: grid; gap: 4px; margin-top: 12px; font-size: .82rem; color: var(--muted); }
+.trim-row b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+.trim-row input[type="range"] { width: 100%; accent-color: var(--accent); }
